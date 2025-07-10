@@ -12,6 +12,7 @@ INTERVAL="/media/shmily/writable/BRCA_project/reference/scattered.interval_list"
 mkdir -p ${OUTDIR}
 
 #=== Step 1: Quality trimming ===#
+eval "$(conda shell.bash hook)"
 conda activate BRCA
 trimmomatic PE -threads 8 \
   ${READ1} ${READ2} \
