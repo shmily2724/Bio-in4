@@ -4,7 +4,7 @@
 SAMPLE_NAME="sample01"
 READ1="raw_data/${SAMPLE_NAME}_R1.fq.gz"
 READ2="raw_data/${SAMPLE_NAME}_R2.fq.gz"
-REF="/media/shmily/writable/BRCA_project/reference/GRCh38.fa"
+REF="/media/shmily/writable/BRCA_project/reference/reference.fa"
 KNOWN_SITES_DIR="/media/shmily/writable/BRCA_project/reference/known_sites"
 OUTDIR="results/${SAMPLE_NAME}"
 INTERVAL="/media/shmily/writable/BRCA_project/reference/scattered.interval_list"
