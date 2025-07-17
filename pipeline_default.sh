@@ -310,7 +310,7 @@ gatk HaplotypeCaller \
   -O ${OUTDIR}/${SAMPLE_NAME}_gatk.g.vcf.gz \
   -ERC GVCF \
   2>&1 | tee -a ${OUTDIR}/gatk_haplotypecaller.log
-log_done
+log_done  
 
 #=== Step 13: Genotype GVCF (Nếu dùng GATK HaplotypeCaller) ===#
 log_step "Step 13: Genotyping GATK GVCF to final VCF (Optional - If GATK HaplotypeCaller is used)"
@@ -332,9 +332,26 @@ log_step "Step 15: Annotating variants with SnpEff"
 conda activate GATK
 SNPEFF_CONFIG="/home/shmily/miniconda/envs/GATK/share/snpeff-5.2-1/snpEff.config"
 SNPEFF_DB="GRCh38.86"
-# Annotate VCF của DeepVariant
-snpEff -c $SNPEFF_CONFIG -v $SNPEFF_DB \
-  ${OUTDIR}/${SAMPLE_NAME}_deepvariant.vcf.gz 2>&1 | tee ${OUTDIR}/${SAMPLE_NAME}_deepvariant_annotated.vcf | tee -a ${OUTDIR}/snpeff_deepvariant_annotation.log
+# *** PHẦN ĐÃ THAY ĐỔI / BỔ SUNG: Cấp phát bộ nhớ cho SnpEff (-Xmx6g) và gọi trực tiếp Java ***
+
+# Với 8GB RAM, 6GB là một lựa chọn hợp lý. Nếu gặp lỗi OutOfMemoryError nữa, hãy thử giảm xuống 5g
+
+java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
+
+  "${OUTDIR}/${SAMPLE_NAME}_gatk.vcf.gz" > "${OUTDIR}/${SAMPLE_NAME}_gatk_annotated.vcf" \
+
+  2>> "${OUTDIR}/snpeff_gatk_annotation.log" # Chuyển stderr vào file log
+
+
+
+# Kiểm tra mã thoát của lệnh Java vừa rồi
+
+if [ $? -ne 0 ]; then
+
+    log_error "SnpEff annotation encountered an issue. Please check ${OUTDIR}/snpeff_gatk_annotation.log for details."
+
+fi
+
 log_done
 
 #=== Step 16: Depth Analysis ===#
