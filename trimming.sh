@@ -3,7 +3,7 @@ SAMPLE=$1
 
 # Tạo biến cho đường dẫn input/output
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
-SAMPLE_DIR="${PROJECT_DIR}/${SAMPLE}"
+SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE}"
 RAW_DIR="${PROJECT_DIR}/raw_data"
 TRIM_DIR="${SAMPLE_DIR}/trimmed_data"
 mkdir -p "$SAMPLE_DIR"
