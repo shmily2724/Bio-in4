@@ -26,5 +26,5 @@ bwa mem -Y \
   -R "@RG\tID:${RG_ID}\tSM:${SAMPLE_NAME}\tPL:${PLATFORM}\tLB:${LIBRARY_ID}\tPU:${PLATFORM_UNIT}" \
   "$REF" \
   "${TRIMMED_R1}" \
-  "${TRIMMED_R1}" | \
+  "${TRIMMED_R2}" | \
 samtools view -Shb -o "${BAM}" -
