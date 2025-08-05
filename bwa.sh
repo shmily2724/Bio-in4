@@ -33,22 +33,21 @@ SORTED_BAM="${BWA_DIR}/${SAMPLE_NAME}_sorted.bam"
 conda activate BRCA
 PICARD_JAR="/home/shmily/miniconda/envs/BRCA/share/picard-2.20.4-0/picard.jar" #đường dẫn chuẩn của picard
 # Gọi Picard bằng lệnh java trực tiếp với -Djava.awt.headless=true
-java -Djava.awt.headless=true -jar "${PICARD_JAR}" 
-    SortSam \ 
+java -Djava.awt.headless=true -jar "${PICARD_JAR}" SortSam \ 
     I="${BAM}"\
     O="${SORTED_BAM}" \
     SORT_ORDER=coordinate \
-    CREATE_INDEX=true \
     VALIDATION_STRINGENCY=SILENT \
     MAX_RECORDS_IN_RAM=2000000
 #Mark duplicate
 BAM_DEDUP="${BWA_DIR}/${SAMPLE_NAME}_dedup.bam"
-DEDUP_METRIX= "${BWA_DIR}/${SAMPLE_NAME}_dedup_metrics.txt"
+DEDUP_METRIX="${BWA_DIR}/${SAMPLE_NAME}_dedup_metrics.txt"
 java -Djava.awt.headless=true -jar "${PICARD_JAR}" 
   MarkDuplicates \
   MAX_RECORDS_IN_RAM=2000000 \
   VALIDATION_STRINGENCY=SILENT \
-  M=$dedup_metrics \
+  M="${DEDUP_METRIX}" \
   I="${SORTED_BAM}" \
-  O="${BAM_DEDUP}" 
+  O="${BAM_DEDUP}" \
+  CREATE_INDEX=true 
     
