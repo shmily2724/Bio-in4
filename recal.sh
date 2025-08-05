@@ -13,6 +13,7 @@ BAM_DEDUP="${BWA_DIR}/${SAMPLE_NAME}_dedup.bam"
 #ouput 
 RECAL_DATA_TABLE="${RECAL_DIR}/${SAMPLE_NAME}_recal_data.table"
 RECAL_BAM="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bam"
+mkdir -p ${RECAL_DIR}
 #chạy conda
 eval "$(conda shell.bash hook)" 
 conda activate GATK 
