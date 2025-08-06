@@ -67,7 +67,7 @@ echo "GenotypeGVCFs hoàn tất."
 
 # --- BƯỚC 3: ĐÁNH INDEX CHO FILE VCF ---
 echo "Đánh index cho file VCF..."
-tabix -p vcf "${HAPLO_VCF}"
+tabix -f -p vcf "${HAPLO_VCF}" # -f để overwrite tránh dừng script tại đây khi chạy lại
 echo "Index hoàn tất."
 
 # --- BƯỚC 4: CHÚ GIẢI VỚI SnpEff ---
