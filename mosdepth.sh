@@ -17,6 +17,7 @@ PROJECT_DIR="/media/shmily/writable/BRCA_project"
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
 RECAL_DIR="${SAMPLE_DIR}/recal"
 COVERAGE_DIR="${SAMPLE_DIR}/coverage"
+TARGET_BED="/media/shmily/writable/BRCA_project/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
 
 # Tạo thư mục output nếu chưa tồn tại
 mkdir -p "${COVERAGE_DIR}"
@@ -45,7 +46,7 @@ echo "Bắt đầu tính toán độ phủ với Mosdepth cho mẫu: ${SAMPLE_NA
 
 mosdepth --threads 8 \
     -n \
-    --by 500 \
+    --by ${TARGET_BED} \
     "${COVERAGE_PREFIX}" \
     "${RECAL_BAM}"
 
