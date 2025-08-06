@@ -15,6 +15,7 @@ SAMPLE_NAME=$1
 # --- TẠO CÁC BIẾN ĐƯỜNG DẪN ---
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
 REF="/media/shmily/writable/BRCA_project/reference/Homo_sapiens_assembly38.fasta"
+TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
 RECAL_DIR="${SAMPLE_DIR}/recal"
 HAPLO_DIR="${SAMPLE_DIR}/haplotypecaller"
@@ -48,6 +49,7 @@ gatk HaplotypeCaller \
     -R "${REF}" \
     -I "${RECAL_BAM}" \
     -O "${HAPLO_GVCF}" \
+    -L "${TARGET_BED}" \
     -ERC GVCF
 
 echo "HaplotypeCaller hoàn tất."
@@ -58,7 +60,8 @@ echo "Bắt đầu GenotypeGVCFs cho mẫu: ${SAMPLE_NAME}"
 gatk GenotypeGVCFs \
     -R "${REF}" \
     -V "${HAPLO_GVCF}" \
-    -O "${HAPLO_VCF}"
+    -O "${HAPLO_VCF}" \
+    -L "${TARGET_BED}"
 
 echo "GenotypeGVCFs hoàn tất."
 
@@ -82,4 +85,4 @@ java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
     "${HAPLO_VCF}" > "${ANN_VCF}"
 
 echo "Pipeline hoàn tất cho mẫu: ${SAMPLE_NAME}!"
-EOF
+
