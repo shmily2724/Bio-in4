@@ -14,7 +14,7 @@ SAMPLE_NAME=$1
 
 # --- TẠO CÁC BIẾN ĐƯỜNG DẪN ---
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
-REF="/media/shmily/writable/BRCA_project/reference/reference.fa"
+REF="/media/shmily/writable/BRCA_project/reference/Homo_sapiens_assembly38.fasta"
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
 TRIM_DIR="${SAMPLE_DIR}/trimmed_data"
 BWA_DIR="${SAMPLE_DIR}/Bwa_alignments"
@@ -49,7 +49,7 @@ conda activate BRCA
 echo "Bắt đầu BWA-MEM cho mẫu: ${SAMPLE_NAME}"
 
 # CẢI TIẾN: Kiểm tra sự tồn tại của BWA index trước khi chạy
-if [ ! -f "${REF}.bwt" ]; then
+if [ ! -f "${REF}.64.bwt" ]; then
     echo "Lỗi: Không tìm thấy BWA index cho file tham chiếu. Hãy chạy 'bwa index ${REF}' trước."
     exit 1
 fi
