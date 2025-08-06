@@ -21,7 +21,7 @@ eval "$(conda shell.bash hook)"
 conda activate BRCA
 trimmomatic PE -threads 8 -phred33 
 "${READ1}" "${READ2}" \
-  "${TRIMMED_R1}" "${UNPAIRED_R1}" \
-  "${TRIMMED_R2}" "${UNPAIRED_R2}" \
-ILLUMINACLIP:TruSeq3-PE.fa:2:30:10 
+"${TRIMMED_R1}" "${UNPAIRED_R1}" \
+"${TRIMMED_R2}" "${UNPAIRED_R2}" \
+ILLUMINACLIP:TruSeq3-PE.fa:2:30:10
 LEADING:3 TRAILING:3 SLIDINGWINDOW:4:20 MINLEN:36
