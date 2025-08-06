@@ -48,13 +48,12 @@ conda activate BRCA
 # --- BƯỚC 1: ALIGNMENT VỚI BWA-MEM ---
 echo "Bắt đầu BWA-MEM cho mẫu: ${SAMPLE_NAME}"
 
-# CẢI TIẾN: Kiểm tra sự tồn tại của BWA index trước khi chạy
+# Kiểm tra sự tồn tại của BWA index trước khi chạy
 if [ ! -f "${REF}.64.bwt" ]; then
     echo "Lỗi: Không tìm thấy BWA index cho file tham chiếu. Hãy chạy 'bwa index ${REF}' trước."
     exit 1
 fi
 
-# KHỐI LỆNH ĐÚNG (đã dùng khoảng trắng thông thường)
 bwa mem -Y \
     -K 100000000 \
     -t 16 \
@@ -69,7 +68,6 @@ echo "BWA-MEM hoàn tất."
 # --- BƯỚC 2: SORT BAM VỚI PICARD ---
 echo "Bắt đầu SortSam cho mẫu: ${SAMPLE_NAME}"
 
-# KHỐI LỆNH ĐÚNG (đã dùng khoảng trắng thông thường)
 java -Djava.awt.headless=true -jar "${PICARD_JAR}" SortSam \
     I="${BAM}" \
     O="${SORTED_BAM}" \
@@ -82,7 +80,6 @@ echo "SortSam hoàn tất."
 # --- BƯỚC 3: MARK DUPLICATES VỚI PICARD ---
 echo "Bắt đầu MarkDuplicates cho mẫu: ${SAMPLE_NAME}"
 
-# KHỐI LỆNH ĐÚNG (đã dùng khoảng trắng thông thường)
 java -Djava.awt.headless=true -jar "${PICARD_JAR}" MarkDuplicates \
     I="${SORTED_BAM}" \
     O="${BAM_DEDUP}" \
@@ -90,6 +87,18 @@ java -Djava.awt.headless=true -jar "${PICARD_JAR}" MarkDuplicates \
     CREATE_INDEX=true \
     VALIDATION_STRINGENCY=SILENT \
     MAX_RECORDS_IN_RAM=2000000
+# --- BƯỚC 4 TẠO FILE THỐNG KÊ CHO MultiQC ---
+echo "Bắt đầu tạo file thống kê alignment cho MultiQC..."
 
-echo "Pipeline hoàn tất cho mẫu: ${SAMPLE_NAME}!"
+# File thống kê chi tiết
+STATS_FILE="${BWA_DIR}/${SAMPLE_NAME}_samtools_stats.txt"
+samtools stats "${BAM_DEDUP}" > "${STATS_FILE}"
+
+# File thống kê cờ (flag)
+FLAGSTAT_FILE="${BWA_DIR}/${SAMPLE_NAME}_samtools_flagstat.txt"
+samtools flagstat "${BAM_DEDUP}" > "${FLAGSTAT_FILE}"
+
+echo "Tạo file thống kê hoàn tất."
+echo "Pipeline BWA hoàn tất cho mẫu: ${SAMPLE_NAME}!"
+
     
