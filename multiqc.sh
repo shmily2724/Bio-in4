@@ -15,20 +15,22 @@ SAMPLE_NAME=$1
 # --- TẠO CÁC BIẾN ĐƯỜNG DẪN ---
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
-
+MULTIQC_FILENAME="${SAMPLE_NAME}_report.html"
 # Thư mục output cho báo cáo MultiQC
 MULTIQC_DIR="${SAMPLE_DIR}/multiqc_report"
 
 # Tạo thư mục output nếu chưa tồn tại
 mkdir -p "${MULTIQC_DIR}"
-
+# --- KÍCH HOẠT MÔI TRƯỜNG DÀNH RIÊNG CHO MULTIQC ---
+eval "$(conda shell.bash hook)"
+conda activate MQC
 # --- CHẠY LỆNH MultiQC ---
-# MultiQC được cài toàn hệ thống nên không cần kích hoạt Conda
 echo "Bắt đầu chạy MultiQC trên toàn bộ kết quả của mẫu: ${SAMPLE_NAME}"
 
 multiqc "${SAMPLE_DIR}" \
     --outdir "${MULTIQC_DIR}" \
     --title "Báo cáo QC cho mẫu ${SAMPLE_NAME}" \
+    --filename "${MULTIQC_FILENAME}" \
     --force
 
 echo "MultiQC hoàn tất!"
