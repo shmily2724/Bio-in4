@@ -3,7 +3,7 @@
 # Tự động dừng script khi có lỗi
 set -e
 
-# Kiểm tra xem tham số đầu vào đã được cung cấp chưa
+# Kiểm tra tham số đầu vào
 if [ -z "$1" ]; then
     echo "Lỗi: Vui lòng cung cấp tên mẫu (SAMPLE_NAME)."
     echo "Cách dùng: $0 <sample_name>"
@@ -23,7 +23,7 @@ MULTIQC_DIR="${SAMPLE_DIR}/multiqc_report"
 mkdir -p "${MULTIQC_DIR}"
 
 # --- CHẠY LỆNH MultiQC ---
-# Không cần kích hoạt Conda vì multiqc đã được cài toàn hệ thống
+# MultiQC được cài toàn hệ thống nên không cần kích hoạt Conda
 echo "Bắt đầu chạy MultiQC trên toàn bộ kết quả của mẫu: ${SAMPLE_NAME}"
 
 multiqc "${SAMPLE_DIR}" \
