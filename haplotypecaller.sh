@@ -15,7 +15,7 @@ SAMPLE_NAME=$1
 # --- TẠO CÁC BIẾN ĐƯỜNG DẪN ---
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
 REF="/media/shmily/writable/BRCA_project/reference/Homo_sapiens_assembly38.fasta"
-TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
+TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed" #link tải ở đây https://support.illumina.com/downloads/enrichment-bed-files-hg38.html
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
 RECAL_DIR="${SAMPLE_DIR}/recal"
 HAPLO_DIR="${SAMPLE_DIR}/haplotypecaller"
