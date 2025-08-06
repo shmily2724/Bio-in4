@@ -20,6 +20,7 @@ SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
 RECAL_DIR="${SAMPLE_DIR}/recal"
 HAPLO_DIR="${SAMPLE_DIR}/haplotypecaller"
 ANN_DIR="${SAMPLE_DIR}/snpeff"
+SNPEFF_STATS="${ANN_DIR}/${SAMPLE_NAME}" 
 
 # Tạo các thư mục output
 mkdir -p "${HAPLO_DIR}"
@@ -82,6 +83,7 @@ fi
 
 # SỬA LỖI: Xóa dấu \ ở cuối lệnh
 java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
+    -stats "${SNPEFF_STATS}.html" \
     "${HAPLO_VCF}" > "${ANN_VCF}"
 
 echo "Pipeline hoàn tất cho mẫu: ${SAMPLE_NAME}!"
