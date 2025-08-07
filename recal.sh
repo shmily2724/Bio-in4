@@ -22,13 +22,13 @@ RECAL_DIR="${SAMPLE_DIR}/recal"
 # Các file VCF chứa các biến thể đã biết (known sites)
 KNOWN_SNP="/media/shmily/writable/BRCA_project/reference/known_sites/Homo_sapiens_assembly38.dbsnp138.vcf"
 KNOWN_INDEL="/media/shmily/writable/BRCA_project/reference/known_sites/Homo_sapiens_assembly38.known_indels.vcf.gz"
-1000_INDEL= "/media/shmily/writable/BRCA_project/reference/known_sites/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
+MILLS_1000G_INDEL="/media/shmily/writable/BRCA_project/reference/known_sites/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
 # Tạo thư mục output nếu chưa tồn tại
 mkdir -p "${RECAL_DIR}"
 
 # File input
 BAM_DEDUP="${BWA_DIR}/${SAMPLE_NAME}_dedup.bam"
-BAM_BAI="${BWA_DIR}/${SAMPLE_NAME}_recalibrated.bai"
+BAM_BAI="${BWA_DIR}/${SAMPLE_NAME}_dedup.bai"
 # File output
 RECAL_DATA_TABLE="${RECAL_DIR}/${SAMPLE_NAME}_recal_data.table"
 RECAL_BAM="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bam"
