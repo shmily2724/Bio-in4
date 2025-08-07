@@ -83,7 +83,7 @@ fi
 
 # SỬA LỖI: Xóa dấu \ ở cuối lệnh
 java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-    -stats "${SNPEFF_STATS}.html" \
+    -stats "${SNPEFF_STATS}" \
     "${HAPLO_VCF}" > "${ANN_VCF}"
 
 echo "Pipeline hoàn tất cho mẫu: ${SAMPLE_NAME}!"
