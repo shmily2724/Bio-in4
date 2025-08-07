@@ -28,12 +28,12 @@ mkdir -p "${RECAL_DIR}"
 
 # File input
 BAM_DEDUP="${BWA_DIR}/${SAMPLE_NAME}_dedup.bam"
-
+BAM_BAI="${BWA_DIR}/${SAMPLE_NAME}_recalibrated.bai"
 # File output
 RECAL_DATA_TABLE="${RECAL_DIR}/${SAMPLE_NAME}_recal_data.table"
 RECAL_BAM="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bam"
 RECAL_BAI="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bai"
-# CẢI TIẾN: Kiểm tra sự tồn tại của các file input quan trọng
+#  Kiểm tra sự tồn tại của các file input quan trọng
 for f in "${BAM_DEDUP}" "${BAM_BAI}" "${REF}" "${KNOWN_SNP}" "${KNOWN_INDEL}" "${MILLS_1000G_INDEL}"; do
     if [ ! -f "$f" ]; then
         echo "Lỗi: Không tìm thấy file input hoặc index cần thiết: $f"
@@ -48,7 +48,7 @@ conda activate GATK
 # --- BƯỚC 1: TẠO BẢNG RECALIBRATION VỚI BaseRecalibrator ---
 echo "Bắt đầu BaseRecalibrator cho mẫu: ${SAMPLE_NAME}"
 
-# SỬA LỖI: Khối lệnh đúng, sạch, không có ký tự lạ
+
 gatk BaseRecalibrator \
     -I "${BAM_DEDUP}" \
     -R "${REF}" \
@@ -62,7 +62,6 @@ echo "BaseRecalibrator hoàn tất."
 # --- BƯỚC 2: ÁP DỤNG BQSR VỚI ApplyBQSR ---
 echo "Bắt đầu ApplyBQSR cho mẫu: ${SAMPLE_NAME}"
 
-# SỬA LỖI: Đây là một lệnh riêng biệt, không phải tùy chọn của lệnh trên
 gatk ApplyBQSR \
     -R "${REF}" \
     -I "${BAM_DEDUP}" \
@@ -74,7 +73,6 @@ echo "ApplyBQSR hoàn tất."
 # --- BƯỚC 3: ĐÁNH INDEX CHO FILE BAM CUỐI CÙNG ---
 echo "Bắt đầu đánh index cho file BAM đã recalibrate..."
 
-# SỬA LỖI: Đây là một lệnh riêng biệt
 samtools index "${RECAL_BAM}"
 
 echo "Pipeline BQSR hoàn tất cho mẫu: ${SAMPLE_NAME}!"
