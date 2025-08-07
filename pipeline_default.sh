@@ -252,7 +252,7 @@ fi
 
 # Chạy SnpEff
 java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-    -stats "${SNPEFF_STATS}.html" \
+    -stats "${SNPEFF_STATS}" \
     "${HAPLO_VCF}" > "${ANN_VCF}"
 echo "SnpEff hoàn tất."
 
