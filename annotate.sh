@@ -13,7 +13,7 @@ fi
 # --- THIẾT LẬP CÁC BIẾN CỐ ĐỊNH ---
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
 REF="${PROJECT_DIR}/reference/Homo_sapiens_assembly38.fasta"
-TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
+TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed" #link tải ở đây https://support.illumina.com/downloads/enrichment-bed-files-hg38.html
 SNPEFF_HOME="${PROJECT_DIR}/snpEff"
 SNPEFF_JAR="${SNPEFF_HOME}/snpEff.jar"
 SNPSIFT_JAR="${SNPEFF_HOME}/SnpSift.jar"
