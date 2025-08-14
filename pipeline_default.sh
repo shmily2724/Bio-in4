@@ -339,8 +339,6 @@ if [ "$CLEANUP" = true ]; then
         "${RECAL_DATA_TABLE}" \
         "${HAPLO_GVCF}" \
         "${HAPLO_GVCF}.tbi" \
-        "${HAPLO_VCF}" \
-        "${HAPLO_VCF}.tbi" \
         "${TMP1}" "${TMP2}" "${TMP3}"
     echo "Dọn dẹp hoàn tất."
 else
