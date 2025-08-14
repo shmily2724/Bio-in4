@@ -1,301 +1,353 @@
 #!/bin/bash
+# ===================================================================
+# ==         PIPELINE PHÂN TÍCH DỮ LIỆU BRCA (DeepVariant)        ==
+# ===================================================================
 
-#=== Step 0: Logging utilities ===#
-function log_step {
-  STEP_NAME="$1"
-  echo -e "\n\033[1;34m>>> ${STEP_NAME}...\033[0m"
-}
+set -euo pipefail
 
-function log_done {
-  echo -e "\033[1;32m[Done]\033[0m"
-}
+# ========== CẤU HÌNH CHUNG ==========
+SAMPLE_NAME="${1:?Vui lòng truyền SAMPLE_NAME}"
+THREADS="${THREADS:-8}"
+CLEANUP="${CLEANUP:-true}"
+TARGET_PADDING="${TARGET_PADDING:-0}"  # đệm vùng BED (bp), 0 = tắt
+TIMESTAMP() { date '+%Y-%m-%d %H:%M:%S'; }
 
-function log_error {
-  ERROR_MESSAGE="$1"
-  echo -e "\033[1;31mERROR: ${ERROR_MESSAGE}\033[0m"
-  exit 1
-}
+# Conda envs
+ENV_BRCA="BRCA"
+ENV_GATK="GATK"
+ENV_MQC="MQC"
 
-# Ngắt script ngay lập tức nếu bất kỳ lệnh nào thất bại
-set -e
+# Dự án
+PROJECT_DIR="/media/shmily/writable/BRCA_project"
+SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
+LOG="${SAMPLE_DIR}/${SAMPLE_NAME}_pipeline.log"
+mkdir -p "${SAMPLE_DIR}"
+# exec > >(tee -i "$LOG") 2>&1
 
-#=== Step 1: Check tools in Conda environments ===#
-log_step "Step 1: Checking required tools in Conda environments"
+# ========== THAM CHIẾU & VÙNG MỤC TIÊU ==========
+REF="${PROJECT_DIR}/reference/Homo_sapiens_assembly38.fasta"
+TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
 
-function check_tool {
-  TOOL_NAME="$1"
-  ENV_NAME="$2"
+# Known sites cho GATK BQSR
+KNOWN_SNP="${PROJECT_DIR}/reference/known_sites/Homo_sapiens_assembly38.dbsnp138.vcf"
+KNOWN_INDEL="${PROJECT_DIR}/reference/known_sites/Homo_sapiens_assembly38.known_indels.vcf.gz"
+MILLS_1000G_INDEL="${PROJECT_DIR}/reference/known_sites/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
 
-  if ! conda run -n "$ENV_NAME" which "$TOOL_NAME" &>/dev/null; then
-    echo -e "\033[1;31mERROR: $TOOL_NAME NOT FOUND in environment $ENV_NAME. Please install it.\033[0m"
-    exit 1
-  else
-    echo -e "\033[1;32m✔ $TOOL_NAME found in environment $ENV_NAME\033[0m"
-  fi
-}
+# ========== TOOL PATHS ==========
+FASTQC_BIN="fastqc"
+TRIMMOMATIC_BIN="trimmomatic"
+BWA_BIN="bwa"
+SAMTOOLS_BIN="samtools"
+GATK_BIN="gatk"
+MOSDEPTH_BIN="mosdepth"
+MULTIQC_BIN="multiqc"
+BCFTOOLS_BIN="bcftools"
+BEDTOOLS_BIN="bedtools"
 
-# Tools in BRCA env
-check_tool trimmomatic BRCA
-check_tool bwa BRCA
-check_tool samtools BRCA
-check_tool picard BRCA
-check_tool mosdepth BRCA
-check_tool fastqc BRCA
-check_tool multiqc BRCA
+# JAR / cấu hình
+PICARD_JAR="/home/shmily/miniconda/envs/BRCA/share/picard-2.20.4-0/picard.jar"
+SNPEFF_HOME="${PROJECT_DIR}/snpEff"
+SNPEFF_JAR="${SNPEFF_HOME}/snpEff.jar"
+SNPSIFT_JAR="${SNPEFF_HOME}/SnpSift.jar"
+SNPEFF_CONFIG="${SNPEFF_HOME}/snpEff.config"
+SNPEFF_DB="GRCh38.86"
+SNPEFF_DATA_DIR="${SNPEFF_HOME}/data"
 
-# Tools in GATK env (chỉ cần gatk và snpEff nếu bạn vẫn dùng snpEff với GATK để chú thích)
-# Nếu bạn không sử dụng bất kỳ công cụ GATK nào nữa, có thể bỏ check gatk
-check_tool gatk GATK
-check_tool snpEff GATK
+# Java opts
+JAVA_OPTS_SNPEFF="-Xmx6g -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
+JAVA_OPTS_SNPSIFT="-Xmx4g -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
+JAVA_OPTS_PICARD="-Xmx4g -Djava.awt.headless=true -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
 
-log_done
+# ========== EXTERNAL RESOURCES ==========
+GNOMAD_VCF="${PROJECT_DIR}/reference/resources/gnomad.v4.1.panel.merged.vcf.gz"
+CLINVAR_VCF="${PROJECT_DIR}/reference/resources/clinvar_20250810.vcf.gz"
+THOUSANDG_VCF="${PROJECT_DIR}/reference/resources/1000g.panel.merged.vcf.gz"
 
-#=== Step 2: Input Configuration ===#
-OUTDIR_NAME="$1" # Tên thư mục đầu ra, vd: ERR152
-READ1_FILENAME="$2" # Tên file đọc 1, vd: ERR2228152_1.fastq.gz
-READ2_FILENAME="$3" # Tên file đọc 2, vd: ERR2228152_2.fastq.gz
+# ========== DeepVariant ==========
+RUN_DEEPVARIANT_BIN="${RUN_DEEPVARIANT_BIN:-run_deepvariant}"   # nếu cài native/conda
+DV_DOCKER_IMAGE="${DV_DOCKER_IMAGE:-google/deepvariant:1.9.0}"  # Docker image
+DV_USE_DOCKER="${DV_USE_DOCKER:-auto}"  # auto|true|false
 
-if [[ -z "$OUTDIR_NAME" || -z "$READ1_FILENAME" || -z "$READ2_FILENAME" ]]; then
-  log_error "Missing arguments. Usage: bash pipeline_default.sh <OUTPUT_FOLDER_NAME> <READ1_FILENAME> <READ2_FILENAME>"
-fi
+# Đầu ra DeepVariant (DÙNG THƯ MỤC RIÊNG)
+DEEP_DIR="${SAMPLE_DIR}/deepvariant"
+DV_VCF="${DEEP_DIR}/${SAMPLE_NAME}_deepvariant.vcf.gz"
+DV_GVCF="${DEEP_DIR}/${SAMPLE_NAME}_deepvariant.g.vcf.gz"
+PADDED_BED="${DEEP_DIR}/${SAMPLE_NAME}.targets.pad${TARGET_PADDING}.bed"
 
-# Trích xuất SAMPLE_NAME từ tên file đọc 1 (bỏ phần _1.fastq.gz)
-# Giả định tên file đọc 1 luôn kết thúc bằng _1.fastq.gz
-SAMPLE_NAME=$(basename "${READ1_FILENAME}" | sed 's/_1\.fastq\.gz$//')
+# ========== DỮ LIỆU ĐẦU VÀO ==========
+RAW_DIR="${PROJECT_DIR}/raw_data"
+READ1="${RAW_DIR}/${SAMPLE_NAME}_1.fastq.gz"
+READ2="${RAW_DIR}/${SAMPLE_NAME}_2.fastq.gz"
+ADAPTER_FILE="/home/shmily/miniconda/envs/BRCA/share/trimmomatic-0.39-2/adapters/TruSeq3-PE.fa"
 
-READ1="raw_data/${READ1_FILENAME}"
-READ2="raw_data/${READ2_FILENAME}"
-REF="/media/shmily/writable/BRCA_project/reference/reference.fa"
-KNOWN_SITES_DIR="/media/shmily/writable/BRCA_project/reference/known_sites"
-OUTDIR="results/${OUTDIR_NAME}"
+# ========== THƯ MỤC KẾT QUẢ ==========
+TRIM_DIR="${SAMPLE_DIR}/trimmed_data"
+FASTQC_RAW_DIR="${SAMPLE_DIR}/fastqc_raw"
+FASTQC_TRIM_DIR="${SAMPLE_DIR}/fastqc_trimmed"
+BWA_DIR="${SAMPLE_DIR}/Bwa_alignments"
+RECAL_DIR="${SAMPLE_DIR}/recal"
+ANN_DIR="${SAMPLE_DIR}/snpeff"
+COVERAGE_DIR="${SAMPLE_DIR}/coverage"
+MULTIQC_DIR="${SAMPLE_DIR}/multiqc_report"
 
-# Định nghĩa số luồng CPU (ví dụ: bằng số lõi vật lý của CPU)
-THREADS=$(nproc) # Hoặc THREADS=8 nếu bạn muốn giới hạn 8 luồng
+mkdir -p "${TRIM_DIR}" "${FASTQC_RAW_DIR}" "${FASTQC_TRIM_DIR}" "${BWA_DIR}" \
+         "${RECAL_DIR}" "${DEEP_DIR}" "${ANN_DIR}" "${COVERAGE_DIR}" "${MULTIQC_DIR}"
 
-# Định nghĩa DeepVariant Docker Image Version
-DEEPVARIANT_VERSION="1.9.0" # Hoặc phiên bản DeepVariant bạn đã pull
+# ========== FILE TRUNG GIAN ==========
+TRIMMED_R1="${TRIM_DIR}/${SAMPLE_NAME}_1_paired.fastq.gz"
+TRIMMED_R2="${TRIM_DIR}/${SAMPLE_NAME}_2_paired.fastq.gz"
+UNPAIRED_R1="${TRIM_DIR}/${SAMPLE_NAME}_1_unpaired.fastq.gz"
+UNPAIRED_R2="${TRIM_DIR}/${SAMPLE_NAME}_2_unpaired.fastq.gz"
 
-# Kiểm tra sự tồn tại của các file đầu vào
-if [[ ! -f "$READ1" ]]; then
-  log_error "Input Read1 file not found: ${READ1}. Please ensure it's in the 'raw_data' directory."
-fi
-if [[ ! -f "$READ2" ]]; then
-  log_error "Input Read2 file not found: ${READ2}. Please ensure it's in the 'raw_data' directory."
-fi
-if [[ ! -f "$REF" ]]; then
-  log_error "Reference file not found: ${REF}."
-fi
-if [[ ! -f "${KNOWN_SITES_DIR}/Mills_and_1000G_gold_standard.indels.hg38.chr_FIXED.vcf.gz" ]]; then
-  log_error "Known sites VCF (Mills_and_1000G) not found at ${KNOWN_SITES_DIR}."
-fi
-if [[ ! -f "${KNOWN_SITES_DIR}/Homo_sapiens_assembly38.dbsnp138.chr_FIXED.vcf.gz" ]]; then
-  log_error "Known sites VCF (dbsnp) not found at ${KNOWN_SITES_DIR}."
-fi
+BAM="${BWA_DIR}/${SAMPLE_NAME}_aligned.bam"
+SORTED_BAM="${BWA_DIR}/${SAMPLE_NAME}_sorted.bam"
+BAM_DEDUP="${BWA_DIR}/${SAMPLE_NAME}_dedup.bam"
+BAM_DEDUP_BAI="${BWA_DIR}/${SAMPLE_NAME}_dedup.bai"
+DEDUP_METRICS="${BWA_DIR}/${SAMPLE_NAME}_dedup_metrics.txt"
+STATS_FILE="${BWA_DIR}/${SAMPLE_NAME}_samtools_stats.txt"
+FLAGSTAT_FILE="${BWA_DIR}/${SAMPLE_NAME}_samtools_flagstat.txt"
 
-mkdir -p ${OUTDIR}
-mkdir -p ${OUTDIR}/fastqc_raw
-mkdir -p ${OUTDIR}/fastqc_trimmed
-mkdir -p ${OUTDIR}/deepvariant_logs # Giữ thư mục này cho log của DeepVariant
+RECAL_DATA_TABLE="${RECAL_DIR}/${SAMPLE_NAME}_recal_data.table"
+RECAL_BAM="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bam"
 
-#=== Bước tiền xử lý Conda hook (chỉ chạy 1 lần) ===#
+# ========== OUTPUT ANNOTATION (gắn nhãn _dv) ==========
+SNPEFF_STATS="${ANN_DIR}/${SAMPLE_NAME}_dv"
+ANN_VCF_SNPEFF="${ANN_DIR}/${SAMPLE_NAME}_dv_snpeff.vcf.gz"
+ANN_VCF_GNOMAD="${ANN_DIR}/${SAMPLE_NAME}_dv_gnomad.vcf.gz"
+ANN_VCF_CLINVAR="${ANN_DIR}/${SAMPLE_NAME}_dv_clinvar.vcf.gz"
+ANN_VCF_FINAL="${ANN_DIR}/${SAMPLE_NAME}_dv_final_annotated.vcf.gz"
+
+COVERAGE_PREFIX="${COVERAGE_DIR}/${SAMPLE_NAME}"
+MULTIQC_FILENAME="${SAMPLE_NAME}_report.html"
+
+# --- KÍCH HOẠT CONDA ---
 eval "$(conda shell.bash hook)"
 
-#=== Step 3: Quality Control on Raw Reads (FastQC) ===#
-log_step "Step 3: Running FastQC on raw reads"
-conda activate BRCA
-fastqc ${READ1} -o ${OUTDIR}/fastqc_raw 2>&1 | tee -a ${OUTDIR}/fastqc_raw.log
-fastqc ${READ2} -o ${OUTDIR}/fastqc_raw 2>&1 | tee -a ${OUTDIR}/fastqc_raw.log
-log_done
 
-#=== Step 4: Quality trimming ===#
-log_step "Step 4: Quality trimming with Trimmomatic"
-conda activate BRCA
-TRIMMED_R1="${OUTDIR}/${SAMPLE_NAME}_1_paired.fq.gz"
-TRIMMED_R2="${OUTDIR}/${SAMPLE_NAME}_2_paired.fq.gz"
-UNPAIRED_R1="${OUTDIR}/${SAMPLE_NAME}_1_unpaired.fq.gz"
-UNPAIRED_R2="${OUTDIR}/${SAMPLE_NAME}_2_unpaired.fq.gz"
+# GATK sequence dictionary
+DICT="${REF%.*}.dict"
+[ -s "${DICT}" ] || {
+  echo "ℹ️ Tạo ${DICT}"
+  ${GATK_BIN} CreateSequenceDictionary -R "${REF}" -O "${DICT}" || \
+  java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" CreateSequenceDictionary R="${REF}" O="${DICT}"
+}
 
-trimmomatic PE -threads ${THREADS} \
-  ${READ1} ${READ2} \
-  ${TRIMMED_R1} ${UNPAIRED_R1} \
-  ${TRIMMED_R2} ${UNPAIRED_R2} \
-  SLIDINGWINDOW:4:20 MINLEN:36 \
-  2>&1 | tee -a ${OUTDIR}/trimmomatic.log
-log_done
+# ===================================================================
+# 1) QC & TRIMMING
+# ===================================================================
+echo "---=== BƯỚC 1: QC & Trimming ===---"
+conda activate "${ENV_BRCA}"
 
-#=== Step 5: Quality Control on Trimmed Reads (FastQC) ===#
-log_step "Step 5: Running FastQC on trimmed reads"
-fastqc ${TRIMMED_R1} -o ${OUTDIR}/fastqc_trimmed 2>&1 | tee -a ${OUTDIR}/fastqc_trimmed.log
-fastqc ${TRIMMED_R2} -o ${OUTDIR}/fastqc_trimmed 2>&1 | tee -a ${OUTDIR}/fastqc_trimmed.log
-log_done
+${FASTQC_BIN} --threads ${THREADS} -o "${FASTQC_RAW_DIR}" "${READ1}" "${READ2}"
 
-#=== Step 6: Alignment ===#
-log_step "Step 6: BWA MEM alignment"
+${TRIMMOMATIC_BIN} PE -threads ${THREADS} -phred33 \
+  "${READ1}" "${READ2}" \
+  "${TRIMMED_R1}" "${UNPAIRED_R1}" \
+  "${TRIMMED_R2}" "${UNPAIRED_R2}" \
+  ILLUMINACLIP:"${ADAPTER_FILE}":2:30:10 \
+  LEADING:3 TRAILING:3 SLIDINGWINDOW:4:20 MINLEN:36
 
-RG_ID="${SAMPLE_NAME}_RG"
-PLATFORM="Illumina"
-LIBRARY_ID="Lib1"
-PLATFORM_UNIT="${SAMPLE_NAME}_${PLATFORM}_${LIBRARY_ID}"
+${FASTQC_BIN} --threads ${THREADS} -o "${FASTQC_TRIM_DIR}" "${TRIMMED_R1}" "${TRIMMED_R2}"
 
-rm "${UNPAIRED_R1}" || true
-rm "${UNPAIRED_R2}" || true
+# ===================================================================
+# 2) ALIGN + DEDUP
+# ===================================================================
+echo "---=== BƯỚC 2: Gióng hàng, Sắp xếp, Đánh dấu trùng lặp ===---"
 
-bwa mem -t "${THREADS}" -M \
-    -R "@RG\tID:${RG_ID}\tSM:${SAMPLE_NAME}\tPL:${PLATFORM}\tLB:${LIBRARY_ID}\tPU:${PLATFORM_UNIT}" \
-    "${REF}" "${TRIMMED_R1}" "${TRIMMED_R2}" | \
-    samtools view -Sb - \
-    > "${OUTDIR}/${SAMPLE_NAME}_aligned.bam" \
-    2>&1 | tee -a "${OUTDIR}/bwa_mem.log"
+${BWA_BIN} mem -Y -K 100000000 -t ${THREADS} \
+  -R "@RG\tID:${SAMPLE_NAME}_RG\tSM:${SAMPLE_NAME}\tPL:Illumina\tLB:Lib1\tPU:${SAMPLE_NAME}_Illumina_Lib1" \
+  "${REF}" "${TRIMMED_R1}" "${TRIMMED_R2}" \
+  | ${SAMTOOLS_BIN} view -b -o "${BAM}" -
 
-log_done
+java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" SortSam \
+  I="${BAM}" O="${SORTED_BAM}" SORT_ORDER=coordinate \
+  VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
 
-#=== Step 7: Convert SAM to BAM + Sort ===#
-log_step "Step 7: Sort BAM and index..."
+java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" MarkDuplicates \
+  I="${SORTED_BAM}" O="${BAM_DEDUP}" M="${DEDUP_METRICS}" CREATE_INDEX=true \
+  VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
 
-INPUT_ALIGNED_BAM="${OUTDIR}/${SAMPLE_NAME}_aligned.bam"
-OUTPUT_SORTED_BAM="${OUTDIR}/${SAMPLE_NAME}_sorted.bam"
-OUTPUT_SORTED_BAI="${OUTPUT_SORTED_BAM}.bai"
+${SAMTOOLS_BIN} stats "${BAM_DEDUP}" > "${STATS_FILE}"
+${SAMTOOLS_BIN} flagstat "${BAM_DEDUP}" > "${FLAGSTAT_FILE}"
 
-if [ ! -s "${INPUT_ALIGNED_BAM}" ]; then
-    log_error "Missing or empty aligned BAM file from Step 6: ${INPUT_ALIGNED_BAM}."
+# ===================================================================
+# 3) BQSR
+# ===================================================================
+echo "---=== BƯỚC 3: BQSR ===---"
+conda activate "${ENV_GATK}"
+
+${GATK_BIN} BaseRecalibrator \
+  -I "${BAM_DEDUP}" -R "${REF}" \
+  --known-sites "${KNOWN_SNP}" \
+  --known-sites "${KNOWN_INDEL}" \
+  --known-sites "${MILLS_1000G_INDEL}" \
+  -O "${RECAL_DATA_TABLE}"
+
+${GATK_BIN} ApplyBQSR \
+  -R "${REF}" -I "${BAM_DEDUP}" \
+  --bqsr-recal-file "${RECAL_DATA_TABLE}" \
+  -O "${RECAL_BAM}"
+
+${SAMTOOLS_BIN} index "${RECAL_BAM}"
+
+# ===================================================================
+# 4) DEEPVARIANT (TARGETED)
+# ===================================================================
+echo "---=== BƯỚC 4: DeepVariant (WES, regions=BED) ===---"
+mkdir -p "${DEEP_DIR}"
+
+REGIONS_BED="${TARGET_BED}"
+if [ "${TARGET_PADDING}" -gt 0 ]; then
+  if command -v "${BEDTOOLS_BIN}" >/dev/null 2>&1; then
+    cut -f1,2 "${REF}.fai" > "${DEEP_DIR}/genome.sizes"
+    ${BEDTOOLS_BIN} slop -b "${TARGET_PADDING}" -i "${TARGET_BED}" -g "${DEEP_DIR}/genome.sizes" \
+      | ${BEDTOOLS_BIN} merge -i - > "${PADDED_BED}"
+    REGIONS_BED="${PADDED_BED}"
+  else
+    echo "⚠️ Không có bedtools, dùng BED gốc."
+  fi
 fi
 
-samtools sort -@ "${THREADS}" "${INPUT_ALIGNED_BAM}" -o "${OUTPUT_SORTED_BAM}" \
-    2>&1 | tee -a "${OUTDIR}/samtools_sort.log"
-
-if [ $? -ne 0 ]; then
-    log_error "samtools sort encountered an issue. Please check ${OUTDIR}/samtools_sort.log for details."
+# Quyết định dùng native hay Docker
+use_docker=false
+if command -v "${RUN_DEEPVARIANT_BIN}" >/dev/null 2>&1; then
+  use_docker=false
+elif [ "${DV_USE_DOCKER}" = "true" ] || { [ "${DV_USE_DOCKER}" = "auto" ] && command -v docker >/dev/null 2>&1; }; then
+  use_docker=true
+else
+  echo "❌ Không tìm thấy 'run_deepvariant' và Docker chưa sẵn sàng."
+  exit 1
 fi
 
-samtools index -@ "${THREADS}" "${OUTPUT_SORTED_BAM}" \
-    2>&1 | tee -a "${OUTDIR}/samtools_index.log"
-
-if [ $? -ne 0 ]; then
-    log_error "samtools index encountered an issue. Please check ${OUTDIR}/samtools_index.log for details."
-fi
-
-rm "${INPUT_ALIGNED_BAM}" || true
-
-log_done
-
-#=== Step 8: Mark Duplicates ===#
-log_step "Step 8: Mark duplicates with Picard"
-conda activate BRCA
-
-PICARD_JAR="/home/shmily/miniconda/envs/BRCA/share/picard-2.20.4-0/picard.jar"
-
-if [[ ! -f "$PICARD_JAR" ]]; then
-    log_error "Picard JAR file not found at ${PICARD_JAR}. Please verify the path or reinstall Picard."
-fi
-
-java -Djava.awt.headless=true -jar "${PICARD_JAR}" MarkDuplicates \
-  I=${OUTDIR}/${SAMPLE_NAME}_sorted.bam \
-  O=${OUTDIR}/${SAMPLE_NAME}_marked.bam \
-  M=${OUTDIR}/${SAMPLE_NAME}_metrics.txt \
-  2>&1 | tee -a ${OUTDIR}/picard_markduplicates.log
-samtools index ${OUTDIR}/${SAMPLE_NAME}_marked.bam 2>&1 | tee -a ${OUTDIR}/samtools_index_marked.log
-rm ${OUTDIR}/${SAMPLE_NAME}_sorted.bam || true
-log_done
-
-#=== Step 9: Base Recalibration ===#
-log_step "Step 9: Base Quality Score Recalibration"
-conda activate GATK
-gatk BaseRecalibrator \
-  -I ${OUTDIR}/${SAMPLE_NAME}_marked.bam \
-  -R ${REF} \
-  --known-sites ${KNOWN_SITES_DIR}/Mills_and_1000G_gold_standard.indels.hg38.chr_FIXED.vcf.gz \
-  --known-sites ${KNOWN_SITES_DIR}/Homo_sapiens_assembly38.dbsnp138.chr_FIXED.vcf.gz \
-  -O ${OUTDIR}/recal_data.table \
-  2>&1 | tee -a ${OUTDIR}/gatk_baserecalibrator.log
-
-gatk ApplyBQSR \
-  -R ${REF} \
-  -I ${OUTDIR}/${SAMPLE_NAME}_marked.bam \
-  --bqsr-recal-file ${OUTDIR}/recal_data.table \
-  -O ${OUTDIR}/${SAMPLE_NAME}_recal.bam \
-  2>&1 | tee -a ${OUTDIR}/gatk_applybqsr.log
-
-rm ${OUTDIR}/recal_data.table || true
-rm ${OUTDIR}/${SAMPLE_NAME}_marked.bam || true
-rm ${OUTDIR}/${SAMPLE_NAME}_marked.bam.bai || true
-log_done
-
-#=== Step 10: Variant Calling with DeepVariant ===#
-log_step "Step 10: Variant Calling with DeepVariant (using Docker)"
-
-# Kiểm tra xem Docker có đang chạy không.
-if ! docker info &>/dev/null; then
-    log_error "Docker is not running or accessible. Please start Docker."
-fi
-
-# Đảm bảo các đường dẫn đầu vào/đầu ra là đường dẫn tuyệt đối cho Docker volume mounting.
-OUTDIR_ABS=$(realpath "${OUTDIR}")
-REF_DIR_ABS=$(realpath "$(dirname "${REF}")")
-
-# Tên file reference bên trong container (phải khớp với cách nó được gắn)
-REF_IN_CONTAINER="/reference_data/$(basename "${REF}")"
-
-# CHÚ Ý: Các file gvcf.tfrecord và make_examples.tfrecord được tạo trong /tmp bên trong container
-# Nếu bạn muốn chúng ở đâu đó cụ thể, bạn cần điều chỉnh trong run_deepvariant script hoặc
-# thay đổi cách DeepVariant được gọi để nó ghi ra một thư mục được mount.
-# Hiện tại, chúng vẫn sẽ xuất hiện trong thư mục tạm của Docker container.
-
-# Chạy DeepVariant bằng Docker
-docker run \
-    -v "${OUTDIR_ABS}":"/output_data" \
-    -v "${REF_DIR_ABS}":"/reference_data" \
-    google/deepvariant:"${DEEPVARIANT_VERSION}" \
+echo "[4.1] Chạy DeepVariant..."
+if [ "${use_docker}" = false ]; then
+  "${RUN_DEEPVARIANT_BIN}" \
+    --model_type=WES \
+    --ref="${REF}" \
+    --reads="${RECAL_BAM}" \
+    --regions="${REGIONS_BED}" \
+    --output_vcf="${DV_VCF}" \
+    --output_gvcf="${DV_GVCF}" \
+    --num_shards="${THREADS}" \
+    --vcf_stats_report=true
+else
+  docker run --rm \
+    -u "$(id -u)":"$(id -g)" \
+    -v "${PROJECT_DIR}:${PROJECT_DIR}" \
+    "${DV_DOCKER_IMAGE}" \
     /opt/deepvariant/bin/run_deepvariant \
-    --model_type=WGS \
-    --ref="${REF_IN_CONTAINER}" \
-    --reads="/output_data/${SAMPLE_NAME}_recal.bam" \
-    --output_vcf="/output_data/${SAMPLE_NAME}_deepvariant.vcf.gz" \
-    --output_gvcf="/output_data/${SAMPLE_NAME}_deepvariant.g.vcf.gz" \
-    --num_shards=${THREADS} \
-    --logging_dir="/output_data/deepvariant_logs" \
-    2>&1 | tee -a "${OUTDIR}/deepvariant.log"
-
-if [ $? -ne 0 ]; then
-    log_error "DeepVariant encountered an issue. Please check ${OUTDIR}/deepvariant.log for details."
+      --model_type=WES \
+      --ref="${REF}" \
+      --reads="${RECAL_BAM}" \
+      --regions="${REGIONS_BED}" \
+      --output_vcf="${DV_VCF}" \
+      --output_gvcf="${DV_GVCF}" \
+      --num_shards="${THREADS}" \
+      --vcf_stats_report=true
 fi
 
-log_done
+tabix -f -p vcf "${DV_VCF}" || true
+tabix -f -p vcf "${DV_GVCF}" || true
+echo "✅ DeepVariant xong: ${DV_VCF}"
 
-#=== Step 11: Index DeepVariant VCF ===#
-log_step "Step 11: Indexing DeepVariant VCF"
-tabix -p vcf ${OUTDIR}/${SAMPLE_NAME}_deepvariant.vcf.gz 2>&1 | tee -a ${OUTDIR}/tabix_deepvariant_index.log
-log_done
+# ===================================================================
+# 4.5) ANNOTATE (SnpEff + SnpSift)
+# ===================================================================
+echo "---=== BƯỚC 4.5: Annotate ===---"
 
-# !!! QUAN TRỌNG: LƯU Ý VỀ FILE _recal.bam !!!
-# File _recal.bam là đầu vào cho Mosdepth (Bước 13).
-# Đảm bảo nó không bị xóa trước khi bước này chạy.
+# Đảm bảo DB SnpEff
+if [ ! -d "${SNPEFF_DATA_DIR}/${SNPEFF_DB}" ]; then
+  echo "⚠️ $(TIMESTAMP) Tải SnpEff DB ${SNPEFF_DB}..."
+  java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" download "$SNPEFF_DB" -c "$SNPEFF_CONFIG"
+fi
 
-#=== Step 12: Annotation with SnpEff ===#
-log_step "Step 12: Annotating variants with SnpEff"
-conda activate GATK
-SNPEFF_CONFIG="/home/shmily/miniconda/envs/GATK/share/snpeff-5.2-1/snpEff.config"
-SNPEFF_DB="GRCh38.86"
+# [1] SnpEff
+java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
+  -stats "${SNPEFF_STATS}" \
+  "${DV_VCF}" | bgzip -@ ${THREADS} -c > "${ANN_VCF_SNPEFF}"
+tabix -f -p vcf "${ANN_VCF_SNPEFF}"
 
-# Annotate VCF của DeepVariant
-snpEff -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-  "${OUTDIR}/${SAMPLE_NAME}_deepvariant.vcf.gz" > "${OUTDIR}/${SAMPLE_NAME}_deepvariant_annotated.vcf" \
-  2>> "${OUTDIR}/snpeff_deepvariant_annotation.log" # Chuyển stderr vào file log
+# [2] gnomAD
+[ -f "${GNOMAD_VCF}" ] || { echo "❌ Không thấy gnomAD: ${GNOMAD_VCF}"; exit 1; }
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -id -info AF \
+  "${GNOMAD_VCF}" "${ANN_VCF_SNPEFF}" \
+  | bgzip -@ ${THREADS} -c > "${ANN_VCF_GNOMAD}"
+tabix -f -p vcf "${ANN_VCF_GNOMAD}"
 
-log_done
+# Đổi AF → GNOMAD_AF (nếu có bcftools)
+if command -v "${BCFTOOLS_BIN}" >/dev/null 2>&1; then
+  echo '##INFO=<ID=GNOMAD_AF,Number=A,Type=Float,Description="Allele frequency from gnomAD">' > "${ANN_DIR}/gn_hdr.hdr"
+  ${BCFTOOLS_BIN} annotate -h "${ANN_DIR}/gn_hdr.hdr" \
+    -c INFO/GNOMAD_AF:=INFO/AF -x INFO/AF \
+    -O z -o "${ANN_DIR}/_tmp_gnomad_renamed.vcf.gz" "${ANN_VCF_GNOMAD}"
+  tabix -f -p vcf "${ANN_DIR}/_tmp_gnomad_renamed.vcf.gz"
+  mv -f "${ANN_DIR}/_tmp_gnomad_renamed.vcf.gz" "${ANN_VCF_GNOMAD}"
+  mv -f "${ANN_DIR}/_tmp_gnomad_renamed.vcf.gz.tbi" "${ANN_VCF_GNOMAD}.tbi"
+  rm -f "${ANN_DIR}/gn_hdr.hdr"
+fi
 
-#=== Step 13: Depth Analysis ===#
-log_step "Step 13: Depth analysis with mosdepth"
-conda activate BRCA
-mosdepth ${OUTDIR}/${SAMPLE_NAME} ${OUTDIR}/${SAMPLE_NAME}_recal.bam 2>&1 | tee -a ${OUTDIR}/mosdepth.log
-log_done
+# [3] ClinVar
+[ -f "${CLINVAR_VCF}" ] || { echo "❌ Không thấy ClinVar: ${CLINVAR_VCF}"; exit 1; }
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info CLNSIG,CLNDN \
+  "${CLINVAR_VCF}" "${ANN_VCF_GNOMAD}" \
+  | bgzip -@ ${THREADS} -c > "${ANN_VCF_CLINVAR}"
+tabix -f -p vcf "${ANN_VCF_CLINVAR}"
 
-#=== Step 14: MultiQC Report ===#
-log_step "Step 14: Generating MultiQC report"
-multiqc ${OUTDIR} -o ${OUTDIR} --filename multiqc_report.html 2>&1 | tee -a ${OUTDIR}/multiqc.log
-log_done
+# [4] 1000 Genomes (+ đổi AF → KG_AF nếu có bcftools)
+[ -f "${THOUSANDG_VCF}" ] || { echo "❌ Không thấy 1000G: ${THOUSANDG_VCF}"; exit 1; }
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF \
+  "${THOUSANDG_VCF}" "${ANN_VCF_CLINVAR}" > "${ANN_DIR}/_tmp_kg.vcf"
 
-#=== Finished ===#
-echo -e "\n\033[1;35m>>> Pipeline completed for ${OUTDIR_NAME} <<<\033[0m"
-echo -e "Check the MultiQC report: ${OUTDIR}/multiqc_report.html"
-echo -e "DeepVariant VCF: ${OUTDIR}/${SAMPLE_NAME}_deepvariant.vcf.gz"
-echo -e "DeepVariant Annotated VCF: ${OUTDIR}/${SAMPLE_NAME}_deepvariant_annotated.vcf"
+if command -v "${BCFTOOLS_BIN}" >/dev/null 2>&1; then
+  echo '##INFO=<ID=KG_AF,Number=A,Type=Float,Description="Allele frequency from 1000 Genomes Project">' > "${ANN_DIR}/kg_hdr.hdr"
+  ${BCFTOOLS_BIN} annotate -h "${ANN_DIR}/kg_hdr.hdr" \
+    -c INFO/KG_AF:=INFO/AF -x INFO/AF \
+    -O z -o "${ANN_VCF_FINAL}" "${ANN_DIR}/_tmp_kg.vcf"
+  tabix -f -p vcf "${ANN_VCF_FINAL}"
+  rm -f "${ANN_DIR}/kg_hdr.hdr" "${ANN_DIR}/_tmp_kg.vcf"
+else
+  bgzip -f -@ ${THREADS} -c "${ANN_DIR}/_tmp_kg.vcf" > "${ANN_VCF_FINAL}"
+  tabix -f -p vcf "${ANN_VCF_FINAL}"
+  rm -f "${ANN_DIR}/_tmp_kg.vcf"
+fi
+
+echo "✅ Annotated VCF cuối: ${ANN_VCF_FINAL}"
+
+# ===================================================================
+# 5) COVERAGE
+# ===================================================================
+echo "---=== BƯỚC 5: Coverage (mosdepth) ===---"
+conda activate "${ENV_BRCA}"
+${MOSDEPTH_BIN} --threads ${THREADS} -n --by ${TARGET_BED} "${COVERAGE_PREFIX}" "${RECAL_BAM}"
+
+# ===================================================================
+# 6) MULTIQC
+# ===================================================================
+echo "---=== BƯỚC 6: MultiQC ===---"
+conda activate "${ENV_MQC}"
+${MULTIQC_BIN} "${SAMPLE_DIR}" \
+  --outdir "${MULTIQC_DIR}" \
+  --title "Báo cáo QC cho mẫu ${SAMPLE_NAME}" \
+  --filename "${MULTIQC_FILENAME}" \
+  --force
+
+# ===================================================================
+# 7) DỌN DẸP
+# ===================================================================
+if [ "$CLEANUP" = true ]; then
+  echo "---=== BƯỚC 7: Dọn dẹp ===---"
+  rm -f "${TRIMMED_R1}" "${UNPAIRED_R1}" \
+        "${TRIMMED_R2}" "${UNPAIRED_R2}" \
+        "${BAM}" "${SORTED_BAM}" \
+        "${BAM_DEDUP}" "${BAM_DEDUP_BAI}" \
+        "${RECAL_DATA_TABLE}"
+fi
+
+echo ""
+echo "==================================================================="
+echo "==  PIPELINE (DeepVariant) HOÀN TẤT CHO MẪU: ${SAMPLE_NAME}"
+echo "==  Kết quả & báo cáo tại: ${SAMPLE_DIR}"
+echo "==  DeepVariant VCF: ${DV_VCF}"
+echo "==  Annotated VCF  : ${ANN_VCF_FINAL}"
+echo "==  MultiQC        : ${MULTIQC_DIR}/${MULTIQC_FILENAME}"
+echo "==================================================================="
