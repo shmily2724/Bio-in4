@@ -118,7 +118,7 @@ ANN_VCF_CLINVAR="${ANN_DIR}/${SAMPLE_NAME}_dv_clinvar.vcf.gz"
 ANN_VCF_FINAL="${ANN_DIR}/${SAMPLE_NAME}_dv_final_annotated.vcf.gz"
 
 COVERAGE_PREFIX="${COVERAGE_DIR}/${SAMPLE_NAME}"
-MULTIQC_FILENAME="${SAMPLE_NAME}_report.html"
+MULTIQC_FILENAME="${SAMPLE_NAME}_dv_report.html"
 
 # --- KÍCH HOẠT CONDA ---
 eval "$(conda shell.bash hook)"
