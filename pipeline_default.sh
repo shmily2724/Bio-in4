@@ -268,11 +268,23 @@ java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_
     -stats "${SNPEFF_STATS}" \
     "${HAPLO_VCF}" > "${TMP1}"
 
-# [2] gnomAD
+# [2] gnomAD (thêm AF), rồi ĐỔI TÊN AF -> GNOMAD_AF (nếu có bcftools)
 echo "📊 [2] Annotating với gnomAD..."
 [ -f "${GNOMAD_VCF}" ] || { echo "❌ Không tìm thấy gnomAD VCF: ${GNOMAD_VCF}"; exit 1; }
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate \
-    -id -info AF "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -id -info AF \
+    "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
+
+if command -v bcftools >/dev/null 2>&1; then
+  echo "📝 Đổi INFO/AF → GNOMAD_AF..."
+  echo '##INFO=<ID=GNOMAD_AF,Number=A,Type=Float,Description="Allele frequency from gnomAD">' > "${ANN_DIR}/gn_hdr.hdr"
+  bcftools annotate -h "${ANN_DIR}/gn_hdr.hdr" \
+    -c INFO/GNOMAD_AF:=INFO/AF -x INFO/AF \
+    -O v -o "${TMP2}.renamed" "${TMP2}"
+  mv -f "${TMP2}.renamed" "${TMP2}"
+  rm -f "${ANN_DIR}/gn_hdr.hdr"
+else
+  echo "ℹ️ Không có bcftools → GIỮ nguyên INFO/AF sau gnomAD."
+fi
 
 # [3] ClinVar
 echo "🧬 [3] Annotating với ClinVar..."
@@ -280,13 +292,25 @@ echo "🧬 [3] Annotating với ClinVar..."
 java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate \
     -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${TMP2}" > "${TMP3}"
 
-# [4] 1000 Genomes
+# [4] 1000 Genomes (thêm AF), rồi ĐỔI TÊN AF -> KG_AF (nếu có bcftools)
 echo "🌍 [4] Annotating với 1000 Genomes..."
 [ -f "${THOUSANDG_VCF}" ] || { echo "❌ Không tìm thấy 1000 Genomes VCF: ${THOUSANDG_VCF}"; exit 1; }
 java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate \
     -info AF "${THOUSANDG_VCF}" "${TMP3}" > "${ANN_VCF}"
 
-echo "✅ Hoàn tất tạo annotated VCF: ${ANN_VCF}"
+if command -v bcftools >/dev/null 2>&1; then
+  echo "📝 Đổi INFO/AF → KG_AF..."
+  echo '##INFO=<ID=KG_AF,Number=A,Type=Float,Description="Allele frequency from 1000 Genomes Project">' > "${ANN_DIR}/kg_hdr.hdr"
+  bcftools annotate -h "${ANN_DIR}/kg_hdr.hdr" \
+    -c INFO/KG_AF:=INFO/AF -x INFO/AF \
+    -O v -o "${ANN_VCF}.tmp" "${ANN_VCF}"
+  mv -f "${ANN_VCF}.tmp" "${ANN_VCF}"
+  rm -f "${ANN_DIR}/kg_hdr.hdr"
+else
+  echo "ℹ️ Không có bcftools → GIỮ nguyên INFO/AF sau 1000G."
+fi
+
+echo "✅ Hoàn tất tạo annotated VCF (đã tách GNOMAD_AF & KG_AF nếu có bcftools): ${ANN_VCF}"
 
 # (Tuỳ chọn) Nén + index VCF cuối để truy vấn nhanh
 if command -v bgzip >/dev/null 2>&1; then
@@ -339,6 +363,8 @@ if [ "$CLEANUP" = true ]; then
         "${RECAL_DATA_TABLE}" \
         "${HAPLO_GVCF}" \
         "${HAPLO_GVCF}.tbi" \
+        "${ANN_DIR}/gn_hdr.hdr" "${ANN_DIR}/kg_hdr.hdr" \
+        "${TMP2}.renamed" "${ANN_VCF}.tmp" \
         "${TMP1}" "${TMP2}" "${TMP3}"
     echo "Dọn dẹp hoàn tất."
 else
