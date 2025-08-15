@@ -268,11 +268,11 @@ java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_
     -stats "${SNPEFF_STATS}" \
     "${HAPLO_VCF}" > "${TMP1}"
 
-# [2] gnomAD (thêm AF), rồi ĐỔI TÊN AF -> GNOMAD_AF (nếu có bcftools)
+# [2] gnomAD (thêm AF) → ĐỔI TÊN AF → GNOMAD_AF (nếu có bcftools)
 echo "📊 [2] Annotating với gnomAD..."
 [ -f "${GNOMAD_VCF}" ] || { echo "❌ Không tìm thấy gnomAD VCF: ${GNOMAD_VCF}"; exit 1; }
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -id -info AF \
-    "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
+#  (KHÔNG dùng -id: sẽ ghép theo CHROM:POS:REF:ALT, an toàn & đầy đủ hơn)
 
 if command -v bcftools >/dev/null 2>&1; then
   echo "📝 Đổi INFO/AF → GNOMAD_AF..."
