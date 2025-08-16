@@ -180,6 +180,7 @@ ${GATK_BIN} HaplotypeCaller -R "${REF}" -I "${RECAL_BAM}" -O "${HAPLO_GVCF}" -L 
 ${GATK_BIN} GenotypeGVCFs -R "${REF}" -V "${HAPLO_GVCF}" -O "${HAPLO_VCF}" -L "${TARGET_BED}"
 (tabix -f -p vcf "${HAPLO_VCF}" || true)
 
+conda activate BCF
 supports_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
 
 NORM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz"
