@@ -21,6 +21,7 @@ SNPEFF_DB="GRCh38.86"
 CLEAN_INTERMEDIATE="${CLEAN_INTERMEDIATE:-true}"  # xóa file tạm sau khi chạy xong
 GZIP_FINAL="${GZIP_FINAL:-true}"                  # nén file cuối
 THREADS="${THREADS:-4}"
+ATOMIZE="${ATOMIZE:-true}"                        # true|false – bật/tắt bước atomize
 
 # ======================== HÀM TIỆN ÍCH ========================
 TS() { date '+%Y-%m-%d %H:%M:%S'; }
@@ -80,6 +81,35 @@ harmonize_to_resource() {
       cp -f "$sample" "$out"
       tabix -f "$out" || true
     fi
+  fi
+}
+
+# bcftools có hỗ trợ --atomize?
+supports_bcftools_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
+
+# Atomize (tách MNP/complex thành primitives) sau khi đã norm
+# $1=in.vcf.gz  $2=out.vcf.gz
+atomize_after_norm() {
+  local in_gz="$1" out_gz="$2"
+  if [[ "$ATOMIZE" != "true" ]]; then
+    echo "[$(TS)] ⏭️  Bỏ qua atomize (ATOMIZE=false)"; cp -f "$in_gz" "$out_gz"; tabix -f "$out_gz" || true; return
+  fi
+  if supports_bcftools_atomize; then
+    echo "[$(TS)] 🧩 Atomize bằng bcftools --atomize..."
+    bcftools norm --atomize -f "$REF" -O z -o "$out_gz" "$in_gz"
+    tabix -f "$out_gz"
+  elif command -v vt >/dev/null 2>&1; then
+    echo "[$(TS)] 🧩 Atomize bằng vt decompose -s..."
+    local tmp_vcf="${out_gz%.gz}"
+    bcftools view -Ov -o "$tmp_vcf" "$in_gz"
+    vt decompose -s "$tmp_vcf" -o "${tmp_vcf%.vcf}.atom.vcf"
+    bgzip -f "${tmp_vcf%.vcf}.atom.vcf"; tabix -f -p vcf "${tmp_vcf%.vcf}.atom.vcf.gz"
+    mv -f "${tmp_vcf%.vcf}.atom.vcf.gz" "$out_gz"
+    mv -f "${tmp_vcf%.vcf}.atom.vcf.gz.tbi" "${out_gz}.tbi"
+    rm -f "$tmp_vcf"
+  else
+    echo "[$(TS)] ⚠️ Không có bcftools --atomize hoặc vt → tiếp tục KHÔNG atomize."
+    cp -f "$in_gz" "$out_gz"; tabix -f "$out_gz" || true
   fi
 }
 
@@ -164,9 +194,13 @@ annotate_one() {
   bcftools norm -m -both -f "$REF" -O z -o "$NORM" "$VCF_IN"
   tabix -f "$NORM"
 
+  # 1b) Atomize primitives (tách MNP/complex)
+  local ATOM="${ANN_DIR}/${S}${SUF}.atom.vcf.gz"
+  atomize_after_norm "$NORM" "$ATOM"
+
   # 2) Đồng bộ 'chr' với gnomAD
   local HARM="${ANN_DIR}/${S}${SUF}.harm.vcf.gz"
-  harmonize_to_resource "$NORM" "$GNOMAD_VCF" "$HARM"
+  harmonize_to_resource "$ATOM" "$GNOMAD_VCF" "$HARM"
 
   # 3) SnpEff (tạo trường ANN)
   local SNPEFF_VCF="${ANN_DIR}/${S}${SUF}_snpeff.vcf"
@@ -210,7 +244,8 @@ annotate_one() {
   # 9) Dọn file tạm (tuỳ chọn)
   if [[ "$CLEAN_INTERMEDIATE" == "true" ]]; then
     echo "[$(TS)] 🧹 Dọn file tạm..."
-    rm -f "$NORM" "${NORM}.tbi" "$HARM" "${HARM}.tbi" \
+    rm -f "$NORM" "${NORM}.tbi" "$ATOM" "${ATOM}.tbi" \
+          "$HARM" "${HARM}.tbi" \
           "$SNPEFF_VCF" "$GNOMAD_STEP" "$GNOMAD_RENAMED" \
           "$CLINVAR_STEP" "$ONEKG_STEP"
   fi
