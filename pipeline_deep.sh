@@ -187,6 +187,7 @@ fi
 (tabix -f -p vcf "${DV_VCF}"  || true)
 (tabix -f -p vcf "${DV_GVCF}" || true)
 
+conda activate BCF
 supports_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
 
 NORM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}_dv.norm.vcf.gz"
