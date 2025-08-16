@@ -9,7 +9,7 @@ REF="${PROJECT_DIR}/reference/Homo_sapiens_assembly38.fasta"
 GNOMAD_VCF="${PROJECT_DIR}/reference/resources/gnomad.v4.1.panel.merged.vcf.gz"
 CLINVAR_VCF="${PROJECT_DIR}/reference/resources/clinvar_20250810.vcf.gz"
 ONEKG_VCF="${PROJECT_DIR}/reference/resources/1000g.panel.merged.vcf.gz"
-
+BCFTOOLS_BIN="${BCFTOOLS_BIN:-/home/shmily/miniconda/envs/BRCA/bin/bcftools}"
 # SnpEff / SnpSift
 SNPEFF_HOME="${PROJECT_DIR}/snpEff"
 SNPEFF_JAR="${SNPEFF_HOME}/snpEff.jar"
@@ -28,11 +28,6 @@ TS() { date '+%Y-%m-%d %H:%M:%S'; }
 
 need_cmd()  { command -v "$1" >/dev/null 2>&1 || { echo "❌ Thiếu tool: $1"; exit 1; }; }
 need_file() { [[ -f "$1" ]] || { echo "❌ Thiếu file: $1"; exit 1; }; }
-
-# header có 'ID=chr'?
-has_chr() {
-  bcftools view -h "$1" | grep -m1 '^##contig' | grep -q 'ID=chr' && return 0 || return 1
-}
 
 # Map rename chr <-> non-chr (tạo 1 lần)
 MKMAP_ADDCHR="$(mktemp)"; cat > "$MKMAP_ADDCHR" <<'EOF'
@@ -64,52 +59,58 @@ MT chrM
 EOF
 MKMAP_RMCHR="$(mktemp)"; awk '{print $2"\t"$1}' "$MKMAP_ADDCHR" > "$MKMAP_RMCHR"
 
+# header có 'ID=chr'?
+has_chr() {
+  "$BCFTOOLS_BIN" view -h "$1" | grep -m1 '^##contig' | grep -q 'ID=chr'
+}
+
 # Đổi tiền tố chr của sample để khớp resource (giữa “chr1” và “1”)
 # $1=sample.vcf.gz  $2=resource.vcf.gz  $3=out.vcf.gz
 harmonize_to_resource() {
   local sample="$1" resource="$2" out="$3"
   if has_chr "$sample" && ! has_chr "$resource"; then
     echo "[$(TS)] 🔁 Bỏ 'chr' để khớp $(basename "$resource")"
-    bcftools annotate --rename-chrs "$MKMAP_RMCHR" -O z -o "$out" "$sample"
-    tabix -f "$out"
+    "$BCFTOOLS_BIN" annotate --rename-chrs "$MKMAP_RMCHR" -O z -o "$out" "$sample"
+    tabix -f -p vcf "$out"
   elif ! has_chr "$sample" && has_chr "$resource"; then
     echo "[$(TS)] 🔁 Thêm 'chr' để khớp $(basename "$resource")"
-    bcftools annotate --rename-chrs "$MKMAP_ADDCHR" -O z -o "$out" "$sample"
-    tabix -f "$out"
+    "$BCFTOOLS_BIN" annotate --rename-chrs "$MKMAP_ADDCHR" -O z -o "$out" "$sample"
+    tabix -f -p vcf "$out"
   else
     if [[ "$sample" != "$out" ]]; then
       cp -f "$sample" "$out"
-      tabix -f "$out" || true
+      tabix -f -p vcf "$out" || true
     fi
   fi
 }
 
-# bcftools có hỗ trợ --atomize?
-supports_bcftools_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
+# "$BCFTOOLS_BIN" có hỗ trợ --atomize?
+supports_atomize() { "$BCFTOOLS_BIN" norm -h 2>&1 | grep -q -- '--atomize'; }
 
 # Atomize (tách MNP/complex thành primitives) sau khi đã norm
 # $1=in.vcf.gz  $2=out.vcf.gz
 atomize_after_norm() {
   local in_gz="$1" out_gz="$2"
   if [[ "$ATOMIZE" != "true" ]]; then
-    echo "[$(TS)] ⏭️  Bỏ qua atomize (ATOMIZE=false)"; cp -f "$in_gz" "$out_gz"; tabix -f "$out_gz" || true; return
+    echo "[$(TS)] ⏭️  Bỏ qua atomize (ATOMIZE=false)"
+    cp -f "$in_gz" "$out_gz"; tabix -f -p vcf "$out_gz" || true; return
   fi
-  if supports_bcftools_atomize; then
-    echo "[$(TS)] 🧩 Atomize bằng bcftools --atomize..."
-    bcftools norm --atomize -f "$REF" -O z -o "$out_gz" "$in_gz"
-    tabix -f "$out_gz"
+  if supports_atomize; then
+    echo "[$(TS)] 🧩 Atomize bằng ${BCFTOOLS_BIN} --atomize..."
+    "$BCFTOOLS_BIN" norm --atomize -f "$REF" -O z -o "$out_gz" "$in_gz"
+    tabix -f -p vcf "$out_gz"
   elif command -v vt >/dev/null 2>&1; then
     echo "[$(TS)] 🧩 Atomize bằng vt decompose -s..."
     local tmp_vcf="${out_gz%.gz}"
-    bcftools view -Ov -o "$tmp_vcf" "$in_gz"
+    "$BCFTOOLS_BIN" view -Ov -o "$tmp_vcf" "$in_gz"
     vt decompose -s "$tmp_vcf" -o "${tmp_vcf%.vcf}.atom.vcf"
     bgzip -f "${tmp_vcf%.vcf}.atom.vcf"; tabix -f -p vcf "${tmp_vcf%.vcf}.atom.vcf.gz"
     mv -f "${tmp_vcf%.vcf}.atom.vcf.gz" "$out_gz"
     mv -f "${tmp_vcf%.vcf}.atom.vcf.gz.tbi" "${out_gz}.tbi"
     rm -f "$tmp_vcf"
   else
-    echo "[$(TS)] ⚠️ Không có bcftools --atomize hoặc vt → tiếp tục KHÔNG atomize."
-    cp -f "$in_gz" "$out_gz"; tabix -f "$out_gz" || true
+    echo "[$(TS)] ⚠️ Không có ${BCFTOOLS_BIN} --atomize hoặc vt → tiếp tục KHÔNG atomize."
+    cp -f "$in_gz" "$out_gz"; tabix -f -p vcf "$out_gz" || true
   fi
 }
 
@@ -121,16 +122,16 @@ rename_AF_to_new_tag() {
   hdr="$(mktemp)"
   echo "##INFO=<ID=${newtag},Number=A,Type=Float,Description=\"Allele frequency from ${newtag}\">" > "$hdr"
   tmp_tsv="$(mktemp)"
-  bcftools query -f'%CHROM\t%POS\t%REF\t%ALT\t%INFO/AF\n' "$in" > "$tmp_tsv"
+  "$BCFTOOLS_BIN" query -f'%CHROM\t%POS\t%REF\t%ALT\t%INFO/AF\n' "$in" > "$tmp_tsv"
   tsv_gz="${tmp_tsv}.gz"; bgzip -f -c "$tmp_tsv" > "$tsv_gz" && tabix -f -s 1 -b 2 -e 2 "$tsv_gz"
-  bcftools annotate \
+  "$BCFTOOLS_BIN" annotate \
     -a "$tsv_gz" -c CHROM,POS,REF,ALT,INFO/"$newtag" \
     -h "$hdr" -x INFO/AF \
     -O v -o "$out" "$in"
   rm -f "$hdr" "$tmp_tsv" "$tsv_gz" "${tsv_gz}.tbi"
 }
 
-# Cần REF.fai cho bcftools norm
+# Cần REF.fai cho "$BCFTOOLS_BIN" norm
 ensure_ref_index() {
   if [[ ! -f "${REF}.fai" ]]; then
     if command -v samtools >/dev/null 2>&1; then
@@ -144,7 +145,7 @@ ensure_ref_index() {
 }
 
 # =================== KIỂM TRA TIỀN ĐIỀU KIỆN ===================
-for c in bcftools tabix bgzip java; do need_cmd "$c"; done
+for c in "$BCFTOOLS_BIN" tabix bgzip java; do need_cmd "$c"; done
 need_file "$REF"
 need_file "$GNOMAD_VCF"
 need_file "$CLINVAR_VCF"
@@ -191,8 +192,8 @@ annotate_one() {
   # 1) Normalize + split multi-allelic
   local NORM="${ANN_DIR}/${S}${SUF}.norm.vcf.gz"
   echo "[$(TS)] 🔧 Normalize + split multi-allelic..."
-  bcftools norm -m -both -f "$REF" -O z -o "$NORM" "$VCF_IN"
-  tabix -f "$NORM"
+  "$BCFTOOLS_BIN" norm -m -both -f "$REF" -O z -o "$NORM" "$VCF_IN"
+  tabix -f -p vcf "$NORM"
 
   # 1b) Atomize primitives (tách MNP/complex)
   local ATOM="${ANN_DIR}/${S}${SUF}.atom.vcf.gz"
