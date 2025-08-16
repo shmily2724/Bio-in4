@@ -1,99 +1,246 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Tự động dừng script khi có lỗi
-set -e
-
-# Kiểm tra có ít nhất 1 tham số không
-if [ "$#" -lt 1 ]; then
-    echo "❌ Lỗi: Vui lòng cung cấp ít nhất một tên mẫu (SAMPLE_NAME)."
-    echo "📌 Cách dùng: $0 <sample_name1> [sample_name2] [...]"
-    exit 1
-fi
-
-# --- THIẾT LẬP CÁC BIẾN CỐ ĐỊNH ---
+# ========================== CẤU HÌNH ==========================
 PROJECT_DIR="/media/shmily/writable/BRCA_project"
+
+# Tham chiếu & resources
 REF="${PROJECT_DIR}/reference/Homo_sapiens_assembly38.fasta"
-TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed" #link tải ở đây https://support.illumina.com/downloads/enrichment-bed-files-hg38.html
+GNOMAD_VCF="${PROJECT_DIR}/reference/resources/gnomad.v4.1.panel.merged.vcf.gz"
+CLINVAR_VCF="${PROJECT_DIR}/reference/resources/clinvar_20250810.vcf.gz"
+ONEKG_VCF="${PROJECT_DIR}/reference/resources/1000g.panel.merged.vcf.gz"
+
+# SnpEff / SnpSift
 SNPEFF_HOME="${PROJECT_DIR}/snpEff"
 SNPEFF_JAR="${SNPEFF_HOME}/snpEff.jar"
 SNPSIFT_JAR="${SNPEFF_HOME}/SnpSift.jar"
 SNPEFF_CONFIG="${SNPEFF_HOME}/snpEff.config"
 SNPEFF_DB="GRCh38.86"
-SNPEFF_DATA_DIR="${SNPEFF_HOME}/data"
-CLEAN_INTERMEDIATE=true  # ✅ Tuỳ chọn xóa file trung gian
 
-# Kiểm tra database SnpEff đã tồn tại chưa
-if [ ! -d "${SNPEFF_DATA_DIR}/${SNPEFF_DB}" ]; then
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] ⚠️ SnpEff DB ${SNPEFF_DB} chưa tồn tại. Đang tải về..."
-    java -jar "$SNPEFF_JAR" download "$SNPEFF_DB" -c "$SNPEFF_CONFIG"
+# Tuỳ chọn
+CLEAN_INTERMEDIATE="${CLEAN_INTERMEDIATE:-true}"  # xóa file tạm sau khi chạy xong
+GZIP_FINAL="${GZIP_FINAL:-true}"                  # nén file cuối
+THREADS="${THREADS:-4}"
+
+# ======================== HÀM TIỆN ÍCH ========================
+TS() { date '+%Y-%m-%d %H:%M:%S'; }
+
+need_cmd()  { command -v "$1" >/dev/null 2>&1 || { echo "❌ Thiếu tool: $1"; exit 1; }; }
+need_file() { [[ -f "$1" ]] || { echo "❌ Thiếu file: $1"; exit 1; }; }
+
+# header có 'ID=chr'?
+has_chr() {
+  bcftools view -h "$1" | grep -m1 '^##contig' | grep -q 'ID=chr' && return 0 || return 1
+}
+
+# Map rename chr <-> non-chr (tạo 1 lần)
+MKMAP_ADDCHR="$(mktemp)"; cat > "$MKMAP_ADDCHR" <<'EOF'
+1 chr1
+2 chr2
+3 chr3
+4 chr4
+5 chr5
+6 chr6
+7 chr7
+8 chr8
+9 chr9
+10 chr10
+11 chr11
+12 chr12
+13 chr13
+14 chr14
+15 chr15
+16 chr16
+17 chr17
+18 chr18
+19 chr19
+20 chr20
+21 chr21
+22 chr22
+X chrX
+Y chrY
+MT chrM
+EOF
+MKMAP_RMCHR="$(mktemp)"; awk '{print $2"\t"$1}' "$MKMAP_ADDCHR" > "$MKMAP_RMCHR"
+
+# Đổi tiền tố chr của sample để khớp resource (giữa “chr1” và “1”)
+# $1=sample.vcf.gz  $2=resource.vcf.gz  $3=out.vcf.gz
+harmonize_to_resource() {
+  local sample="$1" resource="$2" out="$3"
+  if has_chr "$sample" && ! has_chr "$resource"; then
+    echo "[$(TS)] 🔁 Bỏ 'chr' để khớp $(basename "$resource")"
+    bcftools annotate --rename-chrs "$MKMAP_RMCHR" -O z -o "$out" "$sample"
+    tabix -f "$out"
+  elif ! has_chr "$sample" && has_chr "$resource"; then
+    echo "[$(TS)] 🔁 Thêm 'chr' để khớp $(basename "$resource")"
+    bcftools annotate --rename-chrs "$MKMAP_ADDCHR" -O z -o "$out" "$sample"
+    tabix -f "$out"
+  else
+    if [[ "$sample" != "$out" ]]; then
+      cp -f "$sample" "$out"
+      tabix -f "$out" || true
+    fi
+  fi
+}
+
+# Đổi INFO/AF thành tag mới (GNOMAD_AF hoặc KG_AF) rồi xoá AF gốc
+# $1=input.vcf(.gz)  $2=new_tag  $3=out.vcf(.gz|.vcf)
+rename_AF_to_new_tag() {
+  local in="$1" newtag="$2" out="$3"
+  local hdr tmp_tsv tsv_gz
+  hdr="$(mktemp)"
+  echo "##INFO=<ID=${newtag},Number=A,Type=Float,Description=\"Allele frequency from ${newtag}\">" > "$hdr"
+  tmp_tsv="$(mktemp)"
+  bcftools query -f'%CHROM\t%POS\t%REF\t%ALT\t%INFO/AF\n' "$in" > "$tmp_tsv"
+  tsv_gz="${tmp_tsv}.gz"; bgzip -f -c "$tmp_tsv" > "$tsv_gz" && tabix -f -s 1 -b 2 -e 2 "$tsv_gz"
+  bcftools annotate \
+    -a "$tsv_gz" -c CHROM,POS,REF,ALT,INFO/"$newtag" \
+    -h "$hdr" -x INFO/AF \
+    -O v -o "$out" "$in"
+  rm -f "$hdr" "$tmp_tsv" "$tsv_gz" "${tsv_gz}.tbi"
+}
+
+# Cần REF.fai cho bcftools norm
+ensure_ref_index() {
+  if [[ ! -f "${REF}.fai" ]]; then
+    if command -v samtools >/dev/null 2>&1; then
+      echo "[$(TS)] 🧩 Tạo index FASTA tham chiếu..."
+      samtools faidx "$REF"
+    else
+      echo "❌ Thiếu ${REF}.fai và không có samtools để tạo. Cài samtools rồi chạy lại."
+      exit 1
+    fi
+  fi
+}
+
+# =================== KIỂM TRA TIỀN ĐIỀU KIỆN ===================
+for c in bcftools tabix bgzip java; do need_cmd "$c"; done
+need_file "$REF"
+need_file "$GNOMAD_VCF"
+need_file "$CLINVAR_VCF"
+need_file "$ONEKG_VCF"
+need_file "$SNPEFF_JAR"
+need_file "$SNPSIFT_JAR"
+
+# Tải DB SnpEff nếu chưa có
+if [[ ! -d "${SNPEFF_HOME}/data/${SNPEFF_DB}" ]]; then
+  echo "[$(TS)] ⚠️ Chưa có DB SnpEff ${SNPEFF_DB} → tải về..."
+  java -jar "$SNPEFF_JAR" download "$SNPEFF_DB" -c "$SNPEFF_CONFIG"
 fi
 
-# Lặp qua từng mẫu được truyền vào
-for SAMPLE_NAME in "$@"; do
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] ▶️ Bắt đầu xử lý mẫu: ${SAMPLE_NAME}"
+ensure_ref_index
 
-    SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
-    HAPLO_DIR="${SAMPLE_DIR}/haplotypecaller"
-    ANN_DIR="${SAMPLE_DIR}/snpeff"
-    mkdir -p "${ANN_DIR}"
+# ======================= THAM SỐ DÒNG LỆNH =======================
+if [[ $# -lt 1 ]]; then
+  cat <<EOF
+Cách dùng:
+  $(basename "$0") [--which=gatk|dv|both] SAMPLE1 [SAMPLE2 ...]
+Mặc định --which=both
+EOF
+  exit 1
+fi
 
-    # File input và output
-    HAPLO_VCF="${HAPLO_DIR}/${SAMPLE_NAME}_gatk.vcf.gz"
-    ANN_VCF="${ANN_DIR}/${SAMPLE_NAME}_gatk_annotated.vcf"
-    GNOMAD_ANN_VCF="${ANN_DIR}/${SAMPLE_NAME}_gnomad_annotated.vcf"
-    CLINVAR_ANN_VCF="${ANN_DIR}/${SAMPLE_NAME}_clinvar_annotated.vcf"
-    FINAL_ANN_VCF="${ANN_DIR}/${SAMPLE_NAME}_final_annotated.vcf"
-    SNPEFF_STATS="${ANN_DIR}/${SAMPLE_NAME}"
+WHICH="both"
+if [[ "${1-}" =~ ^--which= ]]; then
+  WHICH="${1#--which=}"
+  shift
+fi
 
-    # Kiểm tra file đầu vào
-    if [ ! -f "${HAPLO_VCF}" ]; then
-        echo "❌ Lỗi: File VCF đầu vào không tồn tại: ${HAPLO_VCF}"
-        continue
-    fi
+# ============================ CORE ============================
+# Annotate một VCF của 1 sample
+# $1=sample_id  $2=tag("gatk"|"dv")  $3=input.vcf.gz
+annotate_one() {
+  local S="$1" TAG="$2" VCF_IN="$3"
+  local SAMPLE_DIR="${PROJECT_DIR}/results/${S}"
+  local ANN_DIR="${SAMPLE_DIR}/snpeff"
+  mkdir -p "$ANN_DIR"
 
-    # ✅ Chú giải với SnpEff
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] 🔬 Annotating với SnpEff..."
-    java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-        -stats "${SNPEFF_STATS}" \
-        "${HAPLO_VCF}" > "${ANN_VCF}"
+  local SUF=""; [[ "$TAG" == "dv" ]] && SUF="_dv"
+  echo; echo "[$(TS)] ▶️ Xử lý: ${S} (${TAG})"
 
-    # ✅ Annotate với gnomAD
-    GNOMAD_VCF="${PROJECT_DIR}/reference/resources/gnomad.v4.1.panel.merged.vcf.gz"
-    if [ ! -f "${GNOMAD_VCF}" ]; then
-        echo "❌ Lỗi: Không tìm thấy file gnomAD: ${GNOMAD_VCF}"
-        continue
-    fi
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] 📊 Annotating với gnomAD..."
-    java -Xmx4g -jar "$SNPSIFT_JAR" annotate \
-        -id -info AF "${GNOMAD_VCF}" "${ANN_VCF}" > "${GNOMAD_ANN_VCF}"
+  # 1) Normalize + split multi-allelic
+  local NORM="${ANN_DIR}/${S}${SUF}.norm.vcf.gz"
+  echo "[$(TS)] 🔧 Normalize + split multi-allelic..."
+  bcftools norm -m -both -f "$REF" -O z -o "$NORM" "$VCF_IN"
+  tabix -f "$NORM"
 
-    # ✅ Annotate với ClinVar
-    CLINVAR_VCF="${PROJECT_DIR}/reference/resources/clinvar_20250810.vcf.gz"
-    if [ ! -f "${CLINVAR_VCF}" ]; then
-        echo "❌ Lỗi: Không tìm thấy file ClinVar: ${CLINVAR_VCF}"
-        continue
-    fi
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] 🧬 Annotating với ClinVar..."
-    java -Xmx4g -jar "$SNPSIFT_JAR" annotate \
-        -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${GNOMAD_ANN_VCF}" > "${CLINVAR_ANN_VCF}"
+  # 2) Đồng bộ 'chr' với gnomAD
+  local HARM="${ANN_DIR}/${S}${SUF}.harm.vcf.gz"
+  harmonize_to_resource "$NORM" "$GNOMAD_VCF" "$HARM"
 
-    # ✅ Annotate với 1000 Genomes
-    THOUSANDG_VCF="${PROJECT_DIR}/reference/resources/1000g.panel.merged.vcf.gz"
-    if [ ! -f "${THOUSANDG_VCF}" ]; then
-        echo "❌ Lỗi: Không tìm thấy file 1000 Genomes: ${THOUSANDG_VCF}"
-        continue
-    fi
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] 🌍 Annotating với 1000 Genomes..."
-    java -Xmx4g -jar "$SNPSIFT_JAR" annotate \
-        -info AF "${THOUSANDG_VCF}" "${CLINVAR_ANN_VCF}" > "${FINAL_ANN_VCF}"
+  # 3) SnpEff (tạo trường ANN)
+  local SNPEFF_VCF="${ANN_DIR}/${S}${SUF}_snpeff.vcf"
+  echo "[$(TS)] 🔬 SnpEff..."
+  java -Xmx6g -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
+       -stats "${ANN_DIR}/${S}${SUF}" \
+       "$HARM" > "$SNPEFF_VCF"
 
-    # ✅ Xoá file trung gian nếu cần
-    if [ "$CLEAN_INTERMEDIATE" = true ]; then
-        echo "[`date '+%Y-%m-%d %H:%M:%S'`] 🧹 Xóa các file trung gian..."
-        rm -f "$ANN_VCF" "$GNOMAD_ANN_VCF" "$CLINVAR_ANN_VCF"
-    fi
+  # 4) gnomAD annotate (AF) → GNOMAD_AF
+  local GNOMAD_STEP="${ANN_DIR}/${S}${SUF}_gnomad.vcf"
+  echo "[$(TS)] 📊 gnomAD annotate..."
+  java -Xmx4g -jar "$SNPSIFT_JAR" annotate -info AF "$GNOMAD_VCF" "$SNPEFF_VCF" > "$GNOMAD_STEP"
+  local GNOMAD_RENAMED="${ANN_DIR}/${S}${SUF}_gnomad_renamed.vcf"
+  echo "[$(TS)] 📝 Đổi AF → GNOMAD_AF..."
+  rename_AF_to_new_tag "$GNOMAD_STEP" "GNOMAD_AF" "$GNOMAD_RENAMED"
 
-    echo "[`date '+%Y-%m-%d %H:%M:%S'`] ✅ Hoàn tất pipeline cho mẫu: ${SAMPLE_NAME}"
+  # 5) ClinVar annotate (CLNSIG, CLNDN)
+  local CLINVAR_STEP="${ANN_DIR}/${S}${SUF}_clinvar.vcf"
+  echo "[$(TS)] 🧬 ClinVar annotate..."
+  java -Xmx4g -jar "$SNPSIFT_JAR" annotate -info CLNSIG,CLNDN "$CLINVAR_VCF" "$GNOMAD_RENAMED" > "$CLINVAR_STEP"
+
+  # 6) 1000G annotate (AF) → KG_AF
+  local ONEKG_STEP="${ANN_DIR}/${S}${SUF}_1kg.vcf"
+  echo "[$(TS)] 🌍 1000G annotate..."
+  java -Xmx4g -jar "$SNPSIFT_JAR" annotate -info AF "$ONEKG_VCF" "$CLINVAR_STEP" > "$ONEKG_STEP"
+
+  # 7) Đổi AF → KG_AF & hoàn tất
+  local FINAL_VCF="${ANN_DIR}/${S}${SUF}_final_annotated.vcf"
+  echo "[$(TS)] 📝 Đổi AF → KG_AF..."
+  rename_AF_to_new_tag "$ONEKG_STEP" "KG_AF" "$FINAL_VCF"
+
+  # 8) Nén + index (tuỳ chọn)
+  if [[ "$GZIP_FINAL" == "true" ]]; then
+    bgzip -f "$FINAL_VCF"
+    tabix -f -p vcf "${FINAL_VCF}.gz"
+    echo "[$(TS)] ✅ Final: ${FINAL_VCF}.gz"
+  else
+    echo "[$(TS)] ✅ Final: ${FINAL_VCF}"
+  fi
+
+  # 9) Dọn file tạm (tuỳ chọn)
+  if [[ "$CLEAN_INTERMEDIATE" == "true" ]]; then
+    echo "[$(TS)] 🧹 Dọn file tạm..."
+    rm -f "$NORM" "${NORM}.tbi" "$HARM" "${HARM}.tbi" \
+          "$SNPEFF_VCF" "$GNOMAD_STEP" "$GNOMAD_RENAMED" \
+          "$CLINVAR_STEP" "$ONEKG_STEP"
+  fi
+}
+
+# ======================= CHẠY THEO SAMPLE =======================
+if [[ $# -lt 1 ]]; then echo "❌ Thiếu SAMPLE_ID"; exit 1; fi
+for S in "$@"; do
+  SAMPLE_DIR="${PROJECT_DIR}/results/${S}"
+  VC_GATK="${SAMPLE_DIR}/haplotypecaller/${S}_gatk.vcf.gz"
+  VC_DV="${SAMPLE_DIR}/Deepvariants/${S}_deepvariant.vcf.gz"
+  [[ -d "$SAMPLE_DIR" ]] || { echo "❌ Không thấy thư mục sample: $SAMPLE_DIR"; continue; }
+
+  case "$WHICH" in
+    gatk)
+      need_file "$VC_GATK"
+      annotate_one "$S" "gatk" "$VC_GATK"
+      ;;
+    dv)
+      need_file "$VC_DV"
+      annotate_one "$S" "dv" "$VC_DV"
+      ;;
+    both)
+      if [[ -f "$VC_GATK" ]]; then annotate_one "$S" "gatk" "$VC_GATK"; else echo "⚠️ Bỏ GATK: thiếu $VC_GATK"; fi
+      if [[ -f "$VC_DV"   ]]; then annotate_one "$S" "dv"   "$VC_DV";   else echo "⚠️ Bỏ DV:   thiếu $VC_DV";   fi
+      ;;
+    *)
+      echo "❌ --which phải là gatk|dv|both"; exit 1;;
+  esac
 done
 
-
+# Dọn map tạm
+rm -f "$MKMAP_ADDCHR" "$MKMAP_RMCHR"
