@@ -225,99 +225,125 @@ ${SAMTOOLS_BIN} index "${RECAL_BAM}"
 echo "Đánh index hoàn tất."
 
 # ===================================================================
-# --- BƯỚC 4: GỌI BIẾN THỂ (GATK) & CHÚ GIẢI (SNPEFF + SNPSIFT) ---
+# --- BƯỚC 4: GỌI BIẾN THỂ (GATK) & CHÚ GIẢI (SnpEff + SnpSift) ---
 # ===================================================================
 echo ""
 echo "---=== BƯỚC 4: Bắt đầu Gọi và Chú giải biến thể ===---"
+conda activate "${ENV_GATK}"
 
-echo "[4.1] Gọi biến thể với HaplotypeCaller..."
+echo "[4.1] HaplotypeCaller → GVCF..."
 ${GATK_BIN} HaplotypeCaller \
-    -R "${REF}" \
-    -I "${RECAL_BAM}" \
-    -O "${HAPLO_GVCF}" \
-    -L "${TARGET_BED}" \
-    -ERC GVCF
-echo "HaplotypeCaller hoàn tất."
-
-echo "[4.1b] Index gVCF..."
+  -R "${REF}" -I "${RECAL_BAM}" -O "${HAPLO_GVCF}" -L "${TARGET_BED}" -ERC GVCF
 tabix -f -p vcf "${HAPLO_GVCF}"
 
-echo "[4.2] Chuyển gVCF sang VCF với GenotypeGVCFs..."
-${GATK_BIN} GenotypeGVCFs \
-    -R "${REF}" \
-    -V "${HAPLO_GVCF}" \
-    -O "${HAPLO_VCF}" \
-    -L "${TARGET_BED}"
-echo "GenotypeGVCFs hoàn tất."
-
-echo "[4.3] Đánh index cho file VCF..."
+echo "[4.2] GenotypeGVCFs → VCF..."
+${GATK_BIN} GenotypeGVCFs -R "${REF}" -V "${HAPLO_GVCF}" -O "${HAPLO_VCF}" -L "${TARGET_BED}"
 tabix -f -p vcf "${HAPLO_VCF}"
-echo "Index VCF hoàn tất."
 
-echo "[4.4] Chú giải biến thể với SnpEff + SnpSift..."
+command -v bcftools >/dev/null 2>&1 || { echo "❌ Cần bcftools trong PATH"; exit 1; }
+command -v bgzip    >/dev/null 2>&1 || { echo "❌ Cần bgzip trong PATH"; exit 1; }
+command -v tabix    >/dev/null 2>&1 || { echo "❌ Cần tabix trong PATH"; exit 1; }
 
-# Đảm bảo DB SnpEff sẵn sàng
-if [ ! -d "${SNPEFF_DATA_DIR}/${SNPEFF_DB}" ]; then
-    echo "⚠️ $(TIMESTAMP) Tải database SnpEff ${SNPEFF_DB}..."
-    java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" download "$SNPEFF_DB" -c "$SNPEFF_CONFIG"
+# Helper ngắn cho atomize
+supports_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
+
+echo "[4.3] Chuẩn hoá + tách đa-allele..."
+NORM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz"
+bcftools norm -m -both -f "${REF}" -O z -o "${NORM_VCF_GZ}" "${HAPLO_VCF}"
+tabix -f "${NORM_VCF_GZ}"
+
+echo "[4.3b] Atomize (tách MNP/complex thành primitives)..."
+ATOM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz"
+if supports_atomize; then
+  bcftools norm --atomize -f "${REF}" -O z -o "${ATOM_VCF_GZ}" "${NORM_VCF_GZ}"
+  tabix -f "${ATOM_VCF_GZ}"
+elif command -v vt >/dev/null 2>&1; then
+  bcftools view -Ov -o "${ANN_DIR}/tmp.norm.vcf" "${NORM_VCF_GZ}"
+  vt decompose -s "${ANN_DIR}/tmp.norm.vcf" -o "${ANN_DIR}/tmp.atom.vcf"
+  bgzip -f "${ANN_DIR}/tmp.atom.vcf"; tabix -f -p vcf "${ANN_DIR}/tmp.atom.vcf.gz"
+  mv -f "${ANN_DIR}/tmp.atom.vcf.gz" "${ATOM_VCF_GZ}"
+  mv -f "${ANN_DIR}/tmp.atom.vcf.gz.tbi" "${ATOM_VCF_GZ}.tbi"
+  rm -f "${ANN_DIR}/tmp.norm.vcf"
+else
+  echo "⚠️ Không có --atomize hoặc vt → bỏ qua atomize."
+  cp -f "${NORM_VCF_GZ}" "${ATOM_VCF_GZ}"; tabix -f "${ATOM_VCF_GZ}" || true
 fi
 
-# [1] SnpEff
-echo "🔬 [1] Annotating với SnpEff..."
+echo "[4.4] Đồng bộ tiền tố chr với gnomAD..."
+ADDCHR_MAP="$(mktemp)"; cat > "$ADDCHR_MAP" <<'EOF'
+1 chr1
+2 chr2
+3 chr3
+4 chr4
+5 chr5
+6 chr6
+7 chr7
+8 chr8
+9 chr9
+10 chr10
+11 chr11
+12 chr12
+13 chr13
+14 chr14
+15 chr15
+16 chr16
+17 chr17
+18 chr18
+19 chr19
+20 chr20
+21 chr21
+22 chr22
+X chrX
+Y chrY
+MT chrM
+EOF
+RMCHR_MAP="$(mktemp)"; awk '{print $2"\t"$1}' "$ADDCHR_MAP" > "$RMCHR_MAP"
+
+HARM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz"
+if bcftools view -h "${ATOM_VCF_GZ}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
+  if ! bcftools view -h "${GNOMAD_VCF}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
+    bcftools annotate --rename-chrs "$RMCHR_MAP" -O z -o "${HARM_VCF_GZ}" "${ATOM_VCF_GZ}"
+  else
+    cp -f "${ATOM_VCF_GZ}" "${HARM_VCF_GZ}" && tabix -f "${HARM_VCF_GZ}" || true
+  fi
+else
+  if bcftools view -h "${GNOMAD_VCF}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
+    bcftools annotate --rename-chrs "$ADDCHR_MAP" -O z -o "${HARM_VCF_GZ}" "${ATOM_VCF_GZ}"
+  else
+    cp -f "${ATOM_VCF_GZ}" "${HARM_VCF_GZ}" && tabix -f "${HARM_VCF_GZ}" || true
+  fi
+fi
+tabix -f "${HARM_VCF_GZ}"
+rm -f "$ADDCHR_MAP" "$RMCHR_MAP"
+
+echo "🔬 [4.5] SnpEff..."
 java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-    -stats "${SNPEFF_STATS}" \
-    "${HAPLO_VCF}" > "${TMP1}"
+  -stats "${SNPEFF_STATS}" \
+  "${HARM_VCF_GZ}" > "${TMP1}"
 
-# [2] gnomAD (thêm AF) → ĐỔI TÊN AF → GNOMAD_AF (nếu có bcftools)
-echo "📊 [2] Annotating với gnomAD..."
-[ -f "${GNOMAD_VCF}" ] || { echo "❌ Không tìm thấy gnomAD VCF: ${GNOMAD_VCF}"; exit 1; }
+echo "📊 [4.6] gnomAD AF → GNOMAD_AF..."
 java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
-#  (KHÔNG dùng -id: sẽ ghép theo CHROM:POS:REF:ALT, an toàn & đầy đủ hơn)
+GN_HDR="${ANN_DIR}/gn_hdr.hdr"
+echo '##INFO=<ID=GNOMAD_AF,Number=A,Type=Float,Description="Allele frequency from gnomAD">' > "$GN_HDR"
+bcftools annotate -h "$GN_HDR" -c INFO/GNOMAD_AF:=INFO/AF -x INFO/AF -O v -o "${TMP2}.renamed" "${TMP2}"
+mv -f "${TMP2}.renamed" "${TMP2}"
+rm -f "$GN_HDR"
 
-if command -v bcftools >/dev/null 2>&1; then
-  echo "📝 Đổi INFO/AF → GNOMAD_AF..."
-  echo '##INFO=<ID=GNOMAD_AF,Number=A,Type=Float,Description="Allele frequency from gnomAD">' > "${ANN_DIR}/gn_hdr.hdr"
-  bcftools annotate -h "${ANN_DIR}/gn_hdr.hdr" \
-    -c INFO/GNOMAD_AF:=INFO/AF -x INFO/AF \
-    -O v -o "${TMP2}.renamed" "${TMP2}"
-  mv -f "${TMP2}.renamed" "${TMP2}"
-  rm -f "${ANN_DIR}/gn_hdr.hdr"
-else
-  echo "ℹ️ Không có bcftools → GIỮ nguyên INFO/AF sau gnomAD."
-fi
+echo "🧬 [4.7] ClinVar (CLNSIG, CLNDN)..."
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${TMP2}" > "${TMP3}"
 
-# [3] ClinVar
-echo "🧬 [3] Annotating với ClinVar..."
-[ -f "${CLINVAR_VCF}" ] || { echo "❌ Không tìm thấy ClinVar VCF: ${CLINVAR_VCF}"; exit 1; }
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate \
-    -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${TMP2}" > "${TMP3}"
+echo "🌍 [4.8] 1000G AF → KG_AF..."
+java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF "${THOUSANDG_VCF}" "${TMP3}" > "${ANN_VCF}"
+KG_HDR="${ANN_DIR}/kg_hdr.hdr"
+echo '##INFO=<ID=KG_AF,Number=A,Type=Float,Description="Allele frequency from 1000 Genomes Project">' > "$KG_HDR"
+bcftools annotate -h "$KG_HDR" -c INFO/KG_AF:=INFO/AF -x INFO/AF -O v -o "${ANN_VCF}.tmp" "${ANN_VCF}"
+mv -f "${ANN_VCF}.tmp" "${ANN_VCF}"
+rm -f "$KG_HDR"
 
-# [4] 1000 Genomes (thêm AF), rồi ĐỔI TÊN AF -> KG_AF (nếu có bcftools)
-echo "🌍 [4] Annotating với 1000 Genomes..."
-[ -f "${THOUSANDG_VCF}" ] || { echo "❌ Không tìm thấy 1000 Genomes VCF: ${THOUSANDG_VCF}"; exit 1; }
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate \
-    -info AF "${THOUSANDG_VCF}" "${TMP3}" > "${ANN_VCF}"
-
-if command -v bcftools >/dev/null 2>&1; then
-  echo "📝 Đổi INFO/AF → KG_AF..."
-  echo '##INFO=<ID=KG_AF,Number=A,Type=Float,Description="Allele frequency from 1000 Genomes Project">' > "${ANN_DIR}/kg_hdr.hdr"
-  bcftools annotate -h "${ANN_DIR}/kg_hdr.hdr" \
-    -c INFO/KG_AF:=INFO/AF -x INFO/AF \
-    -O v -o "${ANN_VCF}.tmp" "${ANN_VCF}"
-  mv -f "${ANN_VCF}.tmp" "${ANN_VCF}"
-  rm -f "${ANN_DIR}/kg_hdr.hdr"
-else
-  echo "ℹ️ Không có bcftools → GIỮ nguyên INFO/AF sau 1000G."
-fi
-
-echo "✅ Hoàn tất tạo annotated VCF (đã tách GNOMAD_AF & KG_AF nếu có bcftools): ${ANN_VCF}"
-
-# (Tuỳ chọn) Nén + index VCF cuối để truy vấn nhanh
-if command -v bgzip >/dev/null 2>&1; then
-  bgzip -f "${ANN_VCF}"
-  tabix -f -p vcf "${ANN_VCF}.gz"
-  echo "📦 Đã nén & index: ${ANN_VCF}.gz"
-fi
+echo "📦 [4.9] Nén + index..."
+bgzip -f "${ANN_VCF}"
+tabix -f -p vcf "${ANN_VCF}.gz"
+echo "✅ Annotated VCF: ${ANN_VCF}.gz"
 
 # ===================================================================
 # --- BƯỚC 5: TÍNH TOÁN ĐỘ PHỦ (MOSDEPTH) ---
@@ -363,9 +389,21 @@ if [ "$CLEANUP" = true ]; then
         "${RECAL_DATA_TABLE}" \
         "${HAPLO_GVCF}" \
         "${HAPLO_GVCF}.tbi" \
+        "${ANN_DIR}/tmp.norm.vcf" \
+        "${ANN_DIR}/tmp.atom.vcf" \
+        "${ANN_DIR}/tmp.atom.vcf.gz" \
+        "${ANN_DIR}/tmp.atom.vcf.gz.tbi" \
+        "${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz" \
+        "${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz.tbi" \
+        "${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz" \
+        "${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz.tbi" \
+        "${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz" \
+        "${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz.tbi" \
+        "${TMP2}.renamed" \
+        "${ANN_VCF}.tmp" \
         "${ANN_DIR}/gn_hdr.hdr" "${ANN_DIR}/kg_hdr.hdr" \
-        "${TMP2}.renamed" "${ANN_VCF}.tmp" \
-        "${TMP1}" "${TMP2}" "${TMP3}"
+        "${TMP1}" "${TMP2}" "${TMP3}" \
+        || true
     echo "Dọn dẹp hoàn tất."
 else
     echo ""
