@@ -1,64 +1,73 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ===================================================================
-# ==   BRCA PIPELINE (GATK) — TOOL-CHECK ONLY — 2025-08-16         ==
+# ==      PIPELINE PHÂN TÍCH DỮ LIỆU BRCA — GATK (1 SAMPLE)       ==
+# ==      Có cập nhật SnpEff/SnpSift theo khối annotate mới       ==
 # ===================================================================
 set -euo pipefail
 
-# ========== CẤU HÌNH CHUNG ==========
+# ======================= THAM SỐ & CẤU HÌNH =======================
 SAMPLE_NAME="${1:?Vui lòng truyền SAMPLE_NAME}"
 THREADS="${THREADS:-8}"
 CLEANUP="${CLEANUP:-true}"
 TIMESTAMP() { date '+%Y-%m-%d %H:%M:%S'; }
 
 # Conda envs
-ENV_BRCA="BRCA"
-ENV_GATK="GATK"
-ENV_MQC="MQC"
+ENV_BRCA="${ENV_BRCA:-BRCA}"     # fastqc, trimmomatic, bwa, samtools, mosdepth
+ENV_GATK="${ENV_GATK:-GATK}"     # gatk
+ENV_MQC="${ENV_MQC:-MQC}"        # multiqc
+ENV_ANN="${ENV_ANN:-BCF}"        # bcftools, vt (tuỳ chọn), tabix/bgzip, java (snpEff/snpSift)
 
-# Đường dẫn dự án
-PROJECT_DIR="/media/shmily/writable/BRCA_project"
+# Project + log
+PROJECT_DIR="${PROJECT_DIR:-/media/shmily/writable/BRCA_project}"
 SAMPLE_DIR="${PROJECT_DIR}/results/${SAMPLE_NAME}"
-LOG="${SAMPLE_DIR}/${SAMPLE_NAME}_pipeline.log"
 mkdir -p "${SAMPLE_DIR}"
-# exec > >(tee -i "$LOG") 2>&1
 
-# ========== THAM CHIẾU & VÙNG MỤC TIÊU ==========
+# Tham chiếu & mục tiêu
 REF="${PROJECT_DIR}/reference/Homo_sapiens_assembly38.fasta"
 TARGET_BED="${PROJECT_DIR}/reference/TruSight_Cancer_TargetedRegions_v1.0.hg38.bed"
 
-# Known sites cho BQSR (KHÔNG kiểm tra file/index)
+# Known sites cho BQSR
 KNOWN_SNP="${PROJECT_DIR}/reference/known_sites/Homo_sapiens_assembly38.dbsnp138.vcf"
 KNOWN_INDEL="${PROJECT_DIR}/reference/known_sites/Homo_sapiens_assembly38.known_indels.vcf.gz"
 MILLS_1000G_INDEL="${PROJECT_DIR}/reference/known_sites/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"
 
-# ========== TOOL PATHS ==========
-FASTQC_BIN="fastqc"
-TRIMMOMATIC_BIN="trimmomatic"
-BWA_BIN="bwa"
-SAMTOOLS_BIN="samtools"
-GATK_BIN="gatk"
-MOSDEPTH_BIN="mosdepth"
-MULTIQC_BIN="multiqc"
+# Tools (trong PATH hoặc set tuyệt đối)
+FASTQC_BIN="${FASTQC_BIN:-fastqc}"
+TRIMMOMATIC_BIN="${TRIMMOMATIC_BIN:-trimmomatic}"
+BWA_BIN="${BWA_BIN:-bwa}"
+SAMTOOLS_BIN="${SAMTOOLS_BIN:-samtools}"
+GATK_BIN="${GATK_BIN:-gatk}"
+MOSDEPTH_BIN="${MOSDEPTH_BIN:-mosdepth}"
+MULTIQC_BIN="${MULTIQC_BIN:-multiqc}"
+TABIX_BIN="${TABIX_BIN:-tabix}"
+BGZIP_BIN="${BGZIP_BIN:-bgzip}"
+BCFTOOLS_BIN="${BCFTOOLS_BIN:-bcftools}"
 
-PICARD_JAR="/home/shmily/miniconda/envs/BRCA/share/picard-2.20.4-0/picard.jar"
-
-# ========== SnpEff/SnpSift (KHÔNG kiểm tra DB) ==========
+# Picard + snpEff/SnpSift
+PICARD_JAR="${PICARD_JAR:-/home/shmily/miniconda/envs/BRCA/share/picard-2.20.4-0/picard.jar}"
 SNPEFF_HOME="${PROJECT_DIR}/snpEff"
 SNPEFF_JAR="${SNPEFF_HOME}/snpEff.jar"
 SNPSIFT_JAR="${SNPEFF_HOME}/SnpSift.jar"
 SNPEFF_CONFIG="${SNPEFF_HOME}/snpEff.config"
-SNPEFF_DB="GRCh38.86"
+SNPEFF_DB="${SNPEFF_DB:-GRCh38.86}"
+SNPEFF_DATA_DIR="${SNPEFF_HOME}/data"
 
 JAVA_OPTS_SNPEFF="-Xmx6g -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
 JAVA_OPTS_SNPSIFT="-Xmx4g -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
 JAVA_OPTS_PICARD="-Xmx4g -Djava.awt.headless=true -XX:+UseParallelGC -XX:ParallelGCThreads=${THREADS}"
 
-# ========== EXTERNAL RESOURCES (KHÔNG kiểm tra) ==========
+# External annotation
 GNOMAD_VCF="${PROJECT_DIR}/reference/resources/gnomad.v4.1.panel.merged.vcf.gz"
 CLINVAR_VCF="${PROJECT_DIR}/reference/resources/clinvar_20250810.vcf.gz"
 THOUSANDG_VCF="${PROJECT_DIR}/reference/resources/1000g.panel.merged.vcf.gz"
 
-# ========== THƯ MỤC KẾT QUẢ ==========
+# Input FASTQ
+RAW_DIR="${PROJECT_DIR}/raw_data"
+READ1="${RAW_DIR}/${SAMPLE_NAME}_1.fastq.gz"
+READ2="${RAW_DIR}/${SAMPLE_NAME}_2.fastq.gz"
+ADAPTER_FILE="${ADAPTER_FILE:-/home/shmily/miniconda/envs/BRCA/share/trimmomatic-0.39-2/adapters/TruSeq3-PE.fa}"
+
+# Thư mục bước
 TRIM_DIR="${SAMPLE_DIR}/trimmed_data"
 FASTQC_RAW_DIR="${SAMPLE_DIR}/fastqc_raw"
 FASTQC_TRIM_DIR="${SAMPLE_DIR}/fastqc_trimmed"
@@ -68,10 +77,11 @@ HAPLO_DIR="${SAMPLE_DIR}/haplotypecaller"
 ANN_DIR="${SAMPLE_DIR}/snpeff"
 COVERAGE_DIR="${SAMPLE_DIR}/coverage"
 MULTIQC_DIR="${SAMPLE_DIR}/multiqc_report"
-mkdir -p "${TRIM_DIR}" "${FASTQC_RAW_DIR}" "${FASTQC_TRIM_DIR}" "${BWA_DIR}" \
-         "${RECAL_DIR}" "${HAPLO_DIR}" "${ANN_DIR}" "${COVERAGE_DIR}" "${MULTIQC_DIR}"
+mkdir -p "${TRIM_DIR}" "${FASTQC_RAW_DIR}" "${FASTQC_TRIM_DIR}" \
+         "${BWA_DIR}" "${RECAL_DIR}" "${HAPLO_DIR}" "${ANN_DIR}" \
+         "${COVERAGE_DIR}" "${MULTIQC_DIR}"
 
-# ========== FILE TRUNG GIAN & ĐẦU RA ==========
+# File trung gian & đầu ra
 TRIMMED_R1="${TRIM_DIR}/${SAMPLE_NAME}_1_paired.fastq.gz"
 TRIMMED_R2="${TRIM_DIR}/${SAMPLE_NAME}_2_paired.fastq.gz"
 UNPAIRED_R1="${TRIM_DIR}/${SAMPLE_NAME}_1_unpaired.fastq.gz"
@@ -90,120 +100,45 @@ RECAL_BAM="${RECAL_DIR}/${SAMPLE_NAME}_recalibrated.bam"
 
 HAPLO_GVCF="${HAPLO_DIR}/${SAMPLE_NAME}_gatk.g.vcf.gz"
 HAPLO_VCF="${HAPLO_DIR}/${SAMPLE_NAME}_gatk.vcf.gz"
+HAPLO_VCF_TBI="${HAPLO_VCF}.tbi"
 
-SNPEFF_STATS_HTML="${ANN_DIR}/${SAMPLE_NAME}_snpeff_stats.html"
+# Annotate outputs (đặt hậu tố _final_annotated như trước)
+ANN_SNPEFF_VCF="${ANN_DIR}/${SAMPLE_NAME}_snpeff.vcf"
+ANN_GNOMAD_VCF="${ANN_DIR}/${SAMPLE_NAME}_gnomad.vcf"
+ANN_GNOMAD_RENAMED="${ANN_DIR}/${SAMPLE_NAME}_gnomad_renamed.vcf"
+ANN_CLINVAR_VCF="${ANN_DIR}/${SAMPLE_NAME}_clinvar.vcf"
+ANN_1KG_VCF="${ANN_DIR}/${SAMPLE_NAME}_1kg.vcf"
 ANN_VCF_FINAL="${ANN_DIR}/${SAMPLE_NAME}_final_annotated.vcf"
-ANN_VCF_SNPEFF="${ANN_DIR}/${SAMPLE_NAME}_snpeff.vcf"
-ANN_VCF_GNOMAD="${ANN_DIR}/${SAMPLE_NAME}_gnomad.vcf"
-ANN_VCF_CLINVAR="${ANN_DIR}/${SAMPLE_NAME}_clinvar.vcf"
 
-TMP1="${ANN_VCF_SNPEFF}"
-TMP2="${ANN_VCF_GNOMAD}"
-TMP3="${ANN_VCF_CLINVAR}"
-ANN_VCF="${ANN_VCF_FINAL}"
+# Các tệp tạm trong khối annotate mới
+NORM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz"
+ATOM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz"
+HARM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz"
 
+# Coverage & report
 COVERAGE_PREFIX="${COVERAGE_DIR}/${SAMPLE_NAME}"
 MULTIQC_FILENAME="${SAMPLE_NAME}_report.html"
 
-RG_ID="${SAMPLE_NAME}_RG"
-PLATFORM="Illumina"
-LIBRARY_ID="Lib1"
+# Read group
+RG_ID="${SAMPLE_NAME}_RG"; PLATFORM="Illumina"; LIBRARY_ID="Lib1"
 PLATFORM_UNIT="${SAMPLE_NAME}_${PLATFORM}_${LIBRARY_ID}"
 RG_STR="@RG\tID:${RG_ID}\tSM:${SAMPLE_NAME}\tPL:${PLATFORM}\tLB:${LIBRARY_ID}\tPU:${PLATFORM_UNIT}"
 
-# --- KÍCH HOẠT CONDA ---
-eval "$(conda shell.bash hook)"
+# ======================= HÀM HỖ TRỢ ANNOTATE ======================
+need_cmd()  { command -v "$1" >/dev/null 2>&1 || { echo "❌ Thiếu tool: $1"; exit 1; }; }
+need_file() { [[ -f "$1" ]] || { echo "❌ Thiếu file: $1"; exit 1; }; }
 
-# --- CHỈ KIỂM TRA TOOL (không kiểm tra database/file dữ liệu) ---
-need() { command -v "$1" >/dev/null 2>&1 || { echo "❌ Thiếu tool: $1"; exit 127; }; }
-need fastqc; need trimmomatic; need bwa; need samtools; need gatk; need mosdepth; need multiqc
-need java; need bcftools; need bgzip; need tabix
+supports_bcftools_atomize() {
+  local exe; exe="$(command -v "${BCFTOOLS_BIN}" || true)"; [[ -n "$exe" ]] || return 1
+  local help; help="$("$exe" norm -h 2>&1 || true)"
+  case "$help" in *"--atomize"*) return 0 ;; *) return 1 ;; esac
+}
 
-# ===================================================================
-# BƯỚC 1: QC & TRIMMING
-# ===================================================================
-printf '\n'; echo "---=== BƯỚC 1: QC & Trimming ===---"
-conda activate "${ENV_BRCA}"
+has_chr() {
+  "${BCFTOOLS_BIN}" view -h "$1" | grep -m1 '^##contig' | grep -q 'ID=chr' && return 0 || return 1
+}
 
-${FASTQC_BIN} --threads ${THREADS} -o "${FASTQC_RAW_DIR}" "${READ1}" "${READ2}"
-
-${TRIMMOMATIC_BIN} PE -threads ${THREADS} -phred33 \
-  "${READ1}" "${READ2}" \
-  "${TRIMMED_R1}" "${UNPAIRED_R1}" \
-  "${TRIMMED_R2}" "${UNPAIRED_R2}" \
-  ILLUMINACLIP:"${ADAPTER_FILE}":2:30:10 \
-  LEADING:3 TRAILING:3 SLIDINGWINDOW:4:20 MINLEN:36
-
-${FASTQC_BIN} --threads ${THREADS} -o "${FASTQC_TRIM_DIR}" "${TRIMMED_R1}" "${TRIMMED_R2}"
-
-# ===================================================================
-# BƯỚC 2: ALIGN → SORT → MARKDUP
-# ===================================================================
-printf '\n'; echo "---=== BƯỚC 2: Align/Sort/MarkDup ===---"
-
-${BWA_BIN} mem -Y -K 100000000 -t ${THREADS} -R "${RG_STR}" \
-  "$REF" "${TRIMMED_R1}" "${TRIMMED_R2}" \
-  | ${SAMTOOLS_BIN} view -b -o "${BAM}" -
-
-java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" SortSam \
-  I="${BAM}" O="${SORTED_BAM}" SORT_ORDER=coordinate VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
-
-java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" MarkDuplicates \
-  I="${SORTED_BAM}" O="${BAM_DEDUP}" M="${DEDUP_METRICS}" CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
-
-${SAMTOOLS_BIN} stats "${BAM_DEDUP}"   > "${STATS_FILE}"
-${SAMTOOLS_BIN} flagstat "${BAM_DEDUP}" > "${FLAGSTAT_FILE}"
-
-# ===================================================================
-# BƯỚC 3: BQSR
-# ===================================================================
-printf '\n'; echo "---=== BƯỚC 3: BQSR ===---"
-conda activate "${ENV_GATK}"
-
-${GATK_BIN} BaseRecalibrator -I "${BAM_DEDUP}" -R "${REF}" \
-  --known-sites "${KNOWN_SNP}" \
-  --known-sites "${KNOWN_INDEL}" \
-  --known-sites "${MILLS_1000G_INDEL}" \
-  -O "${RECAL_DATA_TABLE}"
-
-${GATK_BIN} ApplyBQSR -R "${REF}" -I "${BAM_DEDUP}" --bqsr-recal-file "${RECAL_DATA_TABLE}" -O "${RECAL_BAM}"
-${SAMTOOLS_BIN} index "${RECAL_BAM}"
-
-# ===================================================================
-# BƯỚC 4: GỌI & CHÚ GIẢI BIẾN THỂ
-# ===================================================================
-printf '\n'; echo "---=== BƯỚC 4: Gọi & Chú giải (GATK) ===---"
-
-${GATK_BIN} HaplotypeCaller -R "${REF}" -I "${RECAL_BAM}" -O "${HAPLO_GVCF}" -L "${TARGET_BED}" -ERC GVCF
-(tabix -f -p vcf "${HAPLO_GVCF}" || true)
-
-${GATK_BIN} GenotypeGVCFs -R "${REF}" -V "${HAPLO_GVCF}" -O "${HAPLO_VCF}" -L "${TARGET_BED}"
-(tabix -f -p vcf "${HAPLO_VCF}" || true)
-
-conda activate BCF
-supports_atomize() { bcftools norm -h 2>&1 | grep -q -- '--atomize'; }
-
-NORM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz"
-bcftools norm -m -both -f "${REF}" -O z -o "${NORM_VCF_GZ}" "${HAPLO_VCF}"
-tabix -f -p vcf "${NORM_VCF_GZ}"
-
-ATOM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz"
-if supports_atomize; then
-  bcftools norm --atomize -f "${REF}" -O z -o "${ATOM_VCF_GZ}" "${NORM_VCF_GZ}"
-  tabix -f -p vcf "${ATOM_VCF_GZ}"
-elif command -v vt >/dev/null 2>&1; then
-  bcftools view -Ov -o "${ANN_DIR}/tmp.norm.vcf" "${NORM_VCF_GZ}"
-  vt decompose -s "${ANN_DIR}/tmp.norm.vcf" -o "${ANN_DIR}/tmp.atom.vcf"
-  bgzip -f "${ANN_DIR}/tmp.atom.vcf"; tabix -f -p vcf "${ANN_DIR}/tmp.atom.vcf.gz"
-  mv -f "${ANN_DIR}/tmp.atom.vcf.gz" "${ATOM_VCF_GZ}"
-  mv -f "${ANN_DIR}/tmp.atom.vcf.gz.tbi" "${ATOM_VCF_GZ}.tbi"
-  rm -f "${ANN_DIR}/tmp.norm.vcf"
-else
-  echo "⚠️ Không có --atomize hoặc vt → bỏ qua atomize."
-  cp -f "${NORM_VCF_GZ}" "${ATOM_VCF_GZ}"; tabix -f -p vcf "${ATOM_VCF_GZ}" || true
-fi
-
-ADDCHR_MAP="$(mktemp)"; cat > "$ADDCHR_MAP" <<'EOF'
+MKMAP_ADDCHR="$(mktemp)"; cat > "$MKMAP_ADDCHR" <<'EOF'
 1 chr1
 2 chr2
 3 chr3
@@ -230,81 +165,193 @@ X chrX
 Y chrY
 MT chrM
 EOF
-RMCHR_MAP="$(mktemp)"; awk '{print $2"\t"$1}' "$ADDCHR_MAP" > "$RMCHR_MAP"
+MKMAP_RMCHR="$(mktemp)"; awk '{print $2"\t"$1}' "$MKMAP_ADDCHR" > "$MKMAP_RMCHR"
 
-HARM_VCF_GZ="${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz"
-if bcftools view -h "${ATOM_VCF_GZ}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
-  if ! bcftools view -h "${GNOMAD_VCF}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
-    bcftools annotate --rename-chrs "$RMCHR_MAP" -O z -o "${HARM_VCF_GZ}" "${ATOM_VCF_GZ}"
+harmonize_to_resource() {
+  local sample="$1" resource="$2" out="$3"
+  if has_chr "$sample" && ! has_chr "$resource"; then
+    echo "[$(TIMESTAMP)] 🔁 Bỏ 'chr' để khớp $(basename "$resource")"
+    "${BCFTOOLS_BIN}" annotate --rename-chrs "$MKMAP_RMCHR" -O z -o "$out" "$sample"
+    "${TABIX_BIN}" -f -p vcf "$out"
+  elif ! has_chr "$sample" && has_chr "$resource"; then
+    echo "[$(TIMESTAMP)] 🔁 Thêm 'chr' để khớp $(basename "$resource")"
+    "${BCFTOOLS_BIN}" annotate --rename-chrs "$MKMAP_ADDCHR" -O z -o "$out" "$sample"
+    "${TABIX_BIN}" -f -p vcf "$out"
   else
-    cp -f "${ATOM_VCF_GZ}" "${HARM_VCF_GZ}" && tabix -f -p vcf "${HARM_VCF_GZ}" || true
+    cp -f "$sample" "$out"
+    "${TABIX_BIN}" -f -p vcf "$out" || true
   fi
-else
-  if bcftools view -h "${GNOMAD_VCF}" | grep -m1 '^##contig' | grep -q 'ID=chr'; then
-    bcftools annotate --rename-chrs "$ADDCHR_MAP" -O z -o "${HARM_VCF_GZ}" "${ATOM_VCF_GZ}"
-  else
-    cp -f "${ATOM_VCF_GZ}" "${HARM_VCF_GZ}" && tabix -f -p vcf "${HARM_VCF_GZ}" || true
+}
+
+rename_AF_to_new_tag() {
+  local in="$1" newtag="$2" out="$3"
+  local hdr tmp tsv_gz
+  hdr="$(mktemp)"
+  echo "##INFO=<ID=${newtag},Number=A,Type=Float,Description=\"Allele frequency from ${newtag}\">" > "$hdr"
+  tmp="$(mktemp)"
+  "${BCFTOOLS_BIN}" query -f'%CHROM\t%POS\t%REF\t%ALT\t%INFO/AF\n' "$in" > "$tmp" || true
+  tsv_gz="${tmp}.gz"; "${BGZIP_BIN}" -f -c "$tmp" > "$tsv_gz" && "${TABIX_BIN}" -f -s 1 -b 2 -e 2 "$tsv_gz"
+  "${BCFTOOLS_BIN}" annotate -a "$tsv_gz" -c CHROM,POS,REF,ALT,INFO/"$newtag" -h "$hdr" -x INFO/AF -O v -o "$out" "$in"
+  rm -f "$hdr" "$tmp" "$tsv_gz" "${tsv_gz}.tbi"
+}
+
+ensure_ref_index() {
+  if [[ ! -f "${REF}.fai" ]]; then
+    echo "[$(TIMESTAMP)] 🧩 Tạo index FASTA tham chiếu (.fai)..."
+    "${SAMTOOLS_BIN}" faidx "$REF"
   fi
-fi
-(tabix -f -p vcf "${HARM_VCF_GZ}" || true)
-rm -f "$ADDCHR_MAP" "$RMCHR_MAP"
+}
 
-# SnpEff + SnpSift annotate (KHÔNG kiểm tra DB)
-java ${JAVA_OPTS_SNPEFF} -jar "$SNPEFF_JAR" ann -c "$SNPEFF_CONFIG" -v "$SNPEFF_DB" \
-  -stats "${SNPEFF_STATS_HTML}" \
-  "${HARM_VCF_GZ}" > "${TMP1}"
+# ======================= KÍCH HOẠT CONDA & CHECK ===================
+eval "$(conda shell.bash hook)"
 
-echo '##INFO=<ID=GNOMAD_AF,Number=A,Type=Float,Description="Allele frequency from gnomAD">' > "${ANN_DIR}/gn_hdr.hdr"
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF "${GNOMAD_VCF}" "${TMP1}" > "${TMP2}"
-bcftools annotate -h "${ANN_DIR}/gn_hdr.hdr" -c INFO/GNOMAD_AF:=INFO/AF -x INFO/AF -O v -o "${TMP2}.renamed" "${TMP2}"
-mv -f "${TMP2}.renamed" "${TMP2}"
-
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${TMP2}" > "${TMP3}"
-
-echo '##INFO=<ID=KG_AF,Number=A,Type=Float,Description="Allele frequency from 1000 Genomes Project">' > "${ANN_DIR}/kg_hdr.hdr"
-java ${JAVA_OPTS_SNPSIFT} -jar "$SNPSIFT_JAR" annotate -info AF "${THOUSANDG_VCF}" "${TMP3}" > "${ANN_VCF}"
-bcftools annotate -h "${ANN_DIR}/kg_hdr.hdr" -c INFO/KG_AF:=INFO/AF -x INFO/AF -O v -o "${ANN_VCF}.tmp" "${ANN_VCF}"
-mv -f "${ANN_VCF}.tmp" "${ANN_VCF}"
-
-bgzip -f "${ANN_VCF}"; tabix -f -p vcf "${ANN_VCF}.gz"
-echo "✅ Annotated VCF: ${ANN_VCF}.gz"
+for f in "${READ1}" "${READ2}" "${ADAPTER_FILE}" "${REF}" "${TARGET_BED}"; do need_file "$f"; done
 
 # ===================================================================
-# BƯỚC 5: COVERAGE
+# 1) QC & TRIMMING
 # ===================================================================
-printf '\n'; echo "---=== BƯỚC 5: Mosdepth ===---"
+echo -e "\n---=== BƯỚC 1: QC & Trimming ===---"
 conda activate "${ENV_BRCA}"
-${MOSDEPTH_BIN} --threads ${THREADS} -n --by ${TARGET_BED} "${COVERAGE_PREFIX}" "${RECAL_BAM}"
+"${FASTQC_BIN}" --threads "${THREADS}" -o "${FASTQC_RAW_DIR}" "${READ1}" "${READ2}"
+"${TRIMMOMATIC_BIN}" PE -threads "${THREADS}" -phred33 \
+  "${READ1}" "${READ2}" \
+  "${TRIMMED_R1}" "${UNPAIRED_R1}" \
+  "${TRIMMED_R2}" "${UNPAIRED_R2}" \
+  ILLUMINACLIP:"${ADAPTER_FILE}":2:30:10 \
+  LEADING:3 TRAILING:3 SLIDINGWINDOW:4:20 MINLEN:36
+"${FASTQC_BIN}" --threads "${THREADS}" -o "${FASTQC_TRIM_DIR}" "${TRIMMED_R1}" "${TRIMMED_R2}"
 
 # ===================================================================
-# BƯỚC 6: MULTIQC
+# 2) ALIGN + DEDUP
 # ===================================================================
-printf '\n'; echo "---=== BƯỚC 6: MultiQC ===---"
+echo -e "\n---=== BƯỚC 2: Gióng hàng & đánh dấu trùng lặp ===---"
+"${BWA_BIN}" mem -Y -K 100000000 -t "${THREADS}" -R "${RG_STR}" "${REF}" "${TRIMMED_R1}" "${TRIMMED_R2}" | \
+  "${SAMTOOLS_BIN}" view -b -o "${BAM}" -
+java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" SortSam I="${BAM}" O="${SORTED_BAM}" SORT_ORDER=coordinate VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
+java ${JAVA_OPTS_PICARD} -jar "${PICARD_JAR}" MarkDuplicates I="${SORTED_BAM}" O="${BAM_DEDUP}" M="${DEDUP_METRICS}" CREATE_INDEX=true VALIDATION_STRINGENCY=SILENT MAX_RECORDS_IN_RAM=2000000
+"${SAMTOOLS_BIN}" stats "${BAM_DEDUP}" > "${STATS_FILE}"
+"${SAMTOOLS_BIN}" flagstat "${BAM_DEDUP}" > "${FLAGSTAT_FILE}"
+
+# ===================================================================
+# 3) BQSR
+# ===================================================================
+echo -e "\n---=== BƯỚC 3: BQSR ===---"
+conda activate "${ENV_GATK}"
+ensure_ref_index
+"${GATK_BIN}" BaseRecalibrator -I "${BAM_DEDUP}" -R "${REF}" --known-sites "${KNOWN_SNP}" --known-sites "${KNOWN_INDEL}" --known-sites "${MILLS_1000G_INDEL}" -O "${RECAL_DATA_TABLE}"
+"${GATK_BIN}" ApplyBQSR -R "${REF}" -I "${BAM_DEDUP}" --bqsr-recal-file "${RECAL_DATA_TABLE}" -O "${RECAL_BAM}"
+"${SAMTOOLS_BIN}" index "${RECAL_BAM}"
+
+# ===================================================================
+# 4) GỌI BIẾN THỂ + ANNOTATE (MỚI)
+# ===================================================================
+echo -e "\n---=== BƯỚC 4: Gọi biến thể (GATK) & Annotate (mới) ===---"
+# HaplotypeCaller (gVCF → VCF)
+"${GATK_BIN}" HaplotypeCaller -R "${REF}" -I "${RECAL_BAM}" -O "${HAPLO_GVCF}" -L "${TARGET_BED}" -ERC GVCF
+"${TABIX_BIN}" -f -p vcf "${HAPLO_GVCF}"
+"${GATK_BIN}" GenotypeGVCFs -R "${REF}" -V "${HAPLO_GVCF}" -O "${HAPLO_VCF}" -L "${TARGET_BED}"
+"${TABIX_BIN}" -f -p vcf "${HAPLO_VCF}"
+
+# ---- Khối annotate mới ----
+conda activate "${ENV_ANN}"
+for c in "${BCFTOOLS_BIN}" "${TABIX_BIN}" "${BGZIP_BIN}" java; do need_cmd "$c"; done
+need_file "${GNOMAD_VCF}"; need_file "${CLINVAR_VCF}"; need_file "${THOUSANDG_VCF}"
+[[ -d "${SNPEFF_DATA_DIR}/${SNPEFF_DB}" ]] || java -jar "${SNPEFF_JAR}" download "${SNPEFF_DB}" -c "${SNPEFF_CONFIG}"
+
+# Normalize + split multi-allelic
+echo "[$(TIMESTAMP)] 🔧 Normalize + split..."
+"${BCFTOOLS_BIN}" norm -m -both -f "${REF}" -O z -o "${NORM_VCF_GZ}" "${HAPLO_VCF}"
+"${TABIX_BIN}" -f -p vcf "${NORM_VCF_GZ}"
+
+# Atomize (nếu hỗ trợ, hoặc dùng vt nếu có, nếu không thì bỏ qua)
+ATOMIZE="${ATOMIZE:-true}"
+if [[ "${ATOMIZE}" == "true" ]] && supports_bcftools_atomize; then
+  echo "[$(TIMESTAMP)] 🧩 Atomize bằng bcftools --atomize..."
+  "${BCFTOOLS_BIN}" norm --atomize -f "${REF}" -O z -o "${ATOM_VCF_GZ}" "${NORM_VCF_GZ}"
+  "${TABIX_BIN}" -f -p vcf "${ATOM_VCF_GZ}"
+elif [[ "${ATOMIZE}" == "true" ]] && command -v vt >/dev/null 2>&1; then
+  echo "[$(TIMESTAMP)] 🧩 Atomize bằng vt decompose -s..."
+  tmp="${ATOM_VCF_GZ%.gz}"
+  "${BCFTOOLS_BIN}" view -Ov -o "$tmp" "${NORM_VCF_GZ}"
+  vt decompose -s "$tmp" -o "${tmp%.vcf}.atom.vcf"
+  "${BGZIP_BIN}" -f "${tmp%.vcf}.atom.vcf"
+  "${TABIX_BIN}" -f -p vcf "${tmp%.vcf}.atom.vcf.gz"
+  mv -f "${tmp%.vcf}.atom.vcf.gz" "${ATOM_VCF_GZ}"
+  mv -f "${tmp%.vcf}.atom.vcf.gz.tbi" "${ATOM_VCF_GZ}.tbi"
+  rm -f "$tmp"
+else
+  echo "[$(TIMESTAMP)] ⏭️  Bỏ qua atomize."
+  cp -f "${NORM_VCF_GZ}" "${ATOM_VCF_GZ}"; "${TABIX_BIN}" -f -p vcf "${ATOM_VCF_GZ}" || true
+fi
+
+# Hài hoà tiền tố 'chr' với gnomAD
+echo "[$(TIMESTAMP)] 🔁 Harmonize chr với gnomAD..."
+harmonize_to_resource "${ATOM_VCF_GZ}" "${GNOMAD_VCF}" "${HARM_VCF_GZ}"
+
+# SnpEff
+echo "[$(TIMESTAMP)] 🔬 SnpEff..."
+java ${JAVA_OPTS_SNPEFF} -jar "${SNPEFF_JAR}" ann -c "${SNPEFF_CONFIG}" -v "${SNPEFF_DB}" -stats "${ANN_DIR}/${SAMPLE_NAME}" "${HARM_VCF_GZ}" > "${ANN_SNPEFF_VCF}"
+
+# gnomAD (AF) → GNOMAD_AF
+echo "[$(TIMESTAMP)] 📊 gnomAD annotate..."
+java ${JAVA_OPTS_SNPSIFT} -jar "${SNPSIFT_JAR}" annotate -info AF "${GNOMAD_VCF}" "${ANN_SNPEFF_VCF}" > "${ANN_GNOMAD_VCF}"
+echo "[$(TIMESTAMP)] 📝 Đổi AF → GNOMAD_AF..."
+rename_AF_to_new_tag "${ANN_GNOMAD_VCF}" "GNOMAD_AF" "${ANN_GNOMAD_RENAMED}"
+
+# ClinVar
+echo "[$(TIMESTAMP)] 🧬 ClinVar annotate..."
+java ${JAVA_OPTS_SNPSIFT} -jar "${SNPSIFT_JAR}" annotate -info CLNSIG,CLNDN "${CLINVAR_VCF}" "${ANN_GNOMAD_RENAMED}" > "${ANN_CLINVAR_VCF}"
+
+# 1000 Genomes (AF) → KG_AF
+echo "[$(TIMESTAMP)] 🌍 1000G annotate..."
+java ${JAVA_OPTS_SNPSIFT} -jar "${SNPSIFT_JAR}" annotate -info AF "${THOUSANDG_VCF}" "${ANN_CLINVAR_VCF}" > "${ANN_1KG_VCF}"
+echo "[$(TIMESTAMP)] 📝 Đổi AF → KG_AF (final)..."
+rename_AF_to_new_tag "${ANN_1KG_VCF}" "KG_AF" "${ANN_VCF_FINAL}"
+
+# (Tuỳ chọn) nén cuối + index
+if command -v "${BGZIP_BIN}" >/dev/null 2>&1; then
+  "${BGZIP_BIN}" -f "${ANN_VCF_FINAL}"
+  "${TABIX_BIN}" -f -p vcf "${ANN_VCF_FINAL}.gz"
+fi
+
+# ===================================================================
+# 5) COVERAGE
+# ===================================================================
+echo -e "\n---=== BƯỚC 5: Mosdepth ===---"
+conda activate "${ENV_BRCA}"
+"${MOSDEPTH_BIN}" --threads "${THREADS}" -n --by "${TARGET_BED}" "${COVERAGE_PREFIX}" "${RECAL_BAM}"
+
+# ===================================================================
+# 6) MULTIQC
+# ===================================================================
+echo -e "\n---=== BƯỚC 6: MultiQC ===---"
 conda activate "${ENV_MQC}"
-${MULTIQC_BIN} "${SAMPLE_DIR}" --outdir "${MULTIQC_DIR}" --title "Báo cáo QC cho mẫu ${SAMPLE_NAME}" --filename "${MULTIQC_FILENAME}" --force
+"${MULTIQC_BIN}" "${SAMPLE_DIR}" --outdir "${MULTIQC_DIR}" --title "Báo cáo QC cho mẫu ${SAMPLE_NAME}" --filename "${MULTIQC_FILENAME}" --force
 
 # ===================================================================
-# BƯỚC 7: CLEANUP
+# 7) CLEANUP
 # ===================================================================
-if [ "${CLEANUP}" = true ]; then
-  printf '\n'; echo "---=== BƯỚC 7: Cleanup ===---"
+echo -e "\n---=== BƯỚC 7: Dọn dẹp ===---"
+if [[ "${CLEANUP}" == "true" ]]; then
   rm -f \
     "${TRIMMED_R1}" "${UNPAIRED_R1}" "${TRIMMED_R2}" "${UNPAIRED_R2}" \
     "${BAM}" "${SORTED_BAM}" "${BAM_DEDUP}" "${BAM_DEDUP_BAI}" \
     "${RECAL_DATA_TABLE}" \
     "${HAPLO_GVCF}" "${HAPLO_GVCF}.tbi" \
-    "${ANN_DIR}/tmp.norm.vcf" "${ANN_DIR}/tmp.atom.vcf" \
-    "${ANN_DIR}/tmp.atom.vcf.gz" "${ANN_DIR}/tmp.atom.vcf.gz.tbi" \
-    "${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz" "${ANN_DIR}/${SAMPLE_NAME}.norm.vcf.gz.tbi" \
-    "${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz" "${ANN_DIR}/${SAMPLE_NAME}.atom.vcf.gz.tbi" \
-    "${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz" "${ANN_DIR}/${SAMPLE_NAME}.harm.vcf.gz.tbi" \
-    "${TMP2}.renamed" "${ANN_VCF}.tmp" \
-    "${ANN_DIR}/gn_hdr.hdr" "${ANN_DIR}/kg_hdr.hdr" \
-    "${TMP1}" "${TMP2}" "${TMP3}" || true
+    "${HAPLO_VCF}" "${HAPLO_VCF_TBI:-${HAPLO_VCF}.tbi}" \
+    "${NORM_VCF_GZ}" "${NORM_VCF_GZ}.tbi" \
+    "${ATOM_VCF_GZ}" "${ATOM_VCF_GZ}.tbi" \
+    "${HARM_VCF_GZ}" "${HARM_VCF_GZ}.tbi" \
+    "${ANN_SNPEFF_VCF}" \
+    "${ANN_GNOMAD_VCF}" "${ANN_GNOMAD_RENAMED}" \
+    "${ANN_CLINVAR_VCF}" "${ANN_1KG_VCF}" \
+    "$MKMAP_ADDCHR" "$MKMAP_RMCHR"
+else
+  echo "Bỏ qua dọn dẹp (CLEANUP=false)"
 fi
 
-printf '\n'; echo "==================================================================="
-echo "==  HOÀN TẤT GATK CHO MẪU: ${SAMPLE_NAME}"
-echo "==  Kết quả: ${SAMPLE_DIR}"
-echo "==  Báo cáo MultiQC: ${MULTIQC_DIR}/${MULTIQC_FILENAME}"
+echo -e "\n==================================================================="
+echo "✅ HOÀN TẤT (GATK) — ${SAMPLE_NAME}"
+echo "Annotated VCF: ${ANN_VCF_FINAL} (và .gz nếu đã nén)"
+echo "Báo cáo MultiQC: ${MULTIQC_DIR}/${MULTIQC_FILENAME}"
 echo "==================================================================="
