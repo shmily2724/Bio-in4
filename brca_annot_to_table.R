@@ -72,7 +72,7 @@ split_ratio_cols <- function(x) {
 # Đổi "/" thường thành "∕" (U+2215) để Excel không hiểu là ngày
 protect_slash <- function(x) gsub("/", "\u2215", as.character(x), fixed = TRUE)
 
-# ---- Safe extractors cho fixed fields ----
+# ---- Safe extractors ----
 safe_num_vec <- function(x, n) {
   if (is.null(x)) return(rep(NA_real_, n))
   if (inherits(x, "CompressedList") || is.list(x)) {
@@ -129,13 +129,11 @@ vaf_from_AD <- function(count_vec, alt_idx) {
   alt / tot
 }
 
-# Vector hoá tính MAF: trả về vector cùng chiều
 maf_from_af_vec <- function(af) {
   x <- suppressWarnings(as.numeric(af))
   ifelse(is.na(x), NA_real_, pmin(x, 1 - x))
 }
 
-# lấy INFO theo nhiều alias
 grab_any <- function(info_list, keys, nvar) {
   for (k in keys) {
     if (k %in% names(info_list)) {
@@ -146,7 +144,7 @@ grab_any <- function(info_list, keys, nvar) {
   rep(NA_character_, nvar)
 }
 
-# Xuất .xlsx với format Text cho các cột dễ bị Excel auto-format
+# Xuất .xlsx với định dạng Text cho các cột dễ bị Excel auto-format
 write_xlsx_text <- function(df, path, text_cols, ratio_cols = character()) {
   if (!requireNamespace("openxlsx", quietly = TRUE)) {
     message("ℹ Chưa cài 'openxlsx' → chỉ xuất CSV. Cài: install.packages('openxlsx')")
@@ -201,7 +199,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
   ALT_LIST <- alt_parts$ALT_LIST
   ALT_STR  <- alt_parts$ALT_STR
 
-  # ID/REF/QUAL/FILTER an toàn
+  # ID/REF/QUAL/FILTER
   ID <- safe_chr_vec(names(rr), nvar); ID[ID %in% c(".", "")] <- NA_character_
   REF    <- safe_chr_vec(fx$REF,    nvar)
   QUAL   <- safe_num_vec(fx$QUAL,   nvar)
@@ -218,7 +216,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
     FILTER  = FILTER
   )
 
-  # -------- INFO (bỏ AF thường) --------
+  # -------- INFO (bỏ AF tổng quát, chỉ chọn theo allele) --------
   inf <- info(vcf)
   AC        <- collapse_field_n(if ("AC" %in% names(inf)) inf$AC else NULL, nvar)
   AN        <- collapse_field_n(if ("AN" %in% names(inf)) inf$AN else NULL, nvar)
@@ -229,9 +227,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
   LOF       <- collapse_field_n(if ("LOF" %in% names(inf)) inf$LOF else NULL, nvar)
   NMD       <- collapse_field_n(if ("NMD" %in% names(inf)) inf$NMD else NULL, nvar)
 
-  info_df <- tibble(
-    VAR_IDX = var_idx, AC, AN, GNOMAD_AF, KG_AF, CLNSIG, CLNDN, LOF, NMD
-  )
+  info_df <- tibble(VAR_IDX = var_idx, AC, AN, GNOMAD_AF, KG_AF, CLNSIG, CLNDN, LOF, NMD)
 
   # -------- ANN --------
   ann_list <- if ("ANN" %in% names(inf)) inf$ANN else NULL
@@ -244,15 +240,17 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
   )
   excel_ratio_cols <- c("Rank","cDNA.pos.length","CDS.pos.length","AA.pos.length")
 
+  # Hàm xuất (duy nhất)
   export_csv_xlsx <- function(df_core, note_tag) {
-    out_csv  <- file.path(out_dir, paste0(sample_id, "_variants_full.csv"))
-    out_xlsx <- file.path(out_dir, paste0(sample_id, "_variants_full.xlsx"))
+    suffix <- if (tag == "dv") "_dv_variants_full" else "_variants_full"
+    out_csv  <- file.path(out_dir, paste0(sample_id, suffix, ".csv"))
+    out_xlsx <- file.path(out_dir, paste0(sample_id, suffix, ".xlsx"))
     write_csv(df_core, out_csv)
     write_xlsx_text(df_core, out_xlsx, text_cols = excel_text_cols, ratio_cols = excel_ratio_cols)
     message("✅ Xuất (", note_tag, "): ", out_csv, " & .xlsx")
   }
 
-  # --- Trường hợp không có ANN ---
+  # --- Không có ANN ---
   if (is.null(ann_list)) {
     out_min <- variant_df %>%
       left_join(info_df, by = "VAR_IDX") %>%
@@ -338,7 +336,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
     function(kg, al, alts) pick_af_for_alt(kg, al, alts)
   )
 
-  # ===== VAF từ FORMAT/AD =====
+  # VAF từ FORMAT/AD
   vaf_vec <- rep(NA_real_, nvar)
   ad <- geno(vcf)$AD
   if (!is.null(ad)) {
@@ -368,7 +366,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
   }
   primary$VAF <- vaf_vec
 
-  # ===== MAF + AF_source (vector hoá) =====
+  # MAF + AF_source
   primary <- primary %>%
     mutate(
       MAF = ifelse(
@@ -380,7 +378,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
                          ifelse(!is.na(KG_AF_sel), "1000g", "none"))
     )
 
-  # ===== Xuất (CSV + XLSX) =====
+  # Output (CSV + XLSX)
   out_min <- primary %>%
     transmute(
       CHROM, POS, REF, ALT, ID, QUAL, FILTER,
@@ -392,16 +390,7 @@ extract_and_write <- function(sample_id, vcf_file, tag = c("gatk","dv"),
       CLNSIG, CLNDN, LOF, NMD
     )
 
-  out_csv  <- file.path(out_dir, paste0(sample_id, "_variants_full.csv"))
-  out_xlsx <- file.path(out_dir, paste0(sample_id, "_variants_full.xlsx"))
-  write_csv(out_min, out_csv)
-  write_xlsx_text(out_min, out_xlsx,
-                  text_cols = c("CHROM","ID","REF","ALT","FILTER","Gene_Name","Annotation",
-                                "Annotation_Impact","Transcript_BioType","Rank","HGVS.c","HGVS.p",
-                                "CLNSIG","CLNDN","AF_source"),
-                  ratio_cols = c("Rank","cDNA.pos.length","CDS.pos.length","AA.pos.length"))
-  message("✅ Xuất: ", out_csv, " & .xlsx")
-
+  export_csv_xlsx(out_min, note_tag = tag)
   invisible(TRUE)
 }
 
