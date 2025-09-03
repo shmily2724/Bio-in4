@@ -284,10 +284,12 @@ echo -e "\n---=== BƯỚC 5: HaplotypeCaller + GenotypeGVCFs ===---"
 "${GATK_BIN}" HaplotypeCaller -R "${REF}" -I "${RECAL_BAM}" -O "${HAPLO_GVCF}" -L "${TARGET_BED}" -ERC GVCF
 "${TABIX_BIN}" -f -p vcf "${HAPLO_GVCF}"
 "${GATK_BIN}" GenotypeGVCFs \
-  -R "${REF}" -V "${HAPLO_GVCF}" -O "${HAPLO_VCF}" -L "${TARGET_BED}" \
-  --annotation-group StandardAnnotation \
-  --annotations ReadPosRankSum --annotations MQRankSum \
+  -R "${REF}" \
+  -V "${HAPLO_GVCF}" \
+  -O "${HAPLO_VCF}" \
+  -L "${TARGET_BED}" \
   --only-output-calls-starting-in-intervals true
+
 
 # ===================================================================
 # 6) HARD FILTER (GATK) + ANNOTATION (DV & GATK)
